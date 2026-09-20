@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vitprune"
+version = "0.1.0"
+description = "Motion-guided visual token pruning for VideoMAE-style backbones"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# The library itself needs nothing beyond tensors. Everything that reads video
+# files or drives an external model lives behind the `pipeline` extra.
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+pipeline = [
+    "opencv-python>=4.8",
+    "PyYAML>=6.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+vitprune = "vitprune.pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
