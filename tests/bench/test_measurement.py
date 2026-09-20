@@ -1,0 +1,247 @@
+"""Drift and latency are measurements, not derivable facts. These tests verify that
+the measurements behave as expected -- not that the values are good, which only real
+hardware can say.
+"""
+
+import numpy as np
+import pytest
+import torch
+
+from vitprune.bench.drift import measure_drift
+from vitprune.bench.latency import LatencyPoint, measure_latency
+from vitprune.bench.report import (
+    EmbeddingSummary,
+    PruningSummary,
+    RunReport,
+    TimingSummary,
+    summarise_pruning,
+)
+from vitprune.core.encoder import PrunedEncoder, PruningPlan
+from vitprune.core.testing import reference_backbone, reference_geometry
+
+
+@pytest.fixture
+def geometry():
+    return reference_geometry(depth=3)
+
+
+@pytest.fixture
+def backbone(geometry):
+    return reference_backbone(geometry)
+
+
+@pytest.fixture
+def clips(geometry):
+    torch.manual_seed(3)
+    return torch.randn(*geometry.input_shape(batch=6))
+
+
+# ---------------------------------------------------------------------------
+# Drift
+# ---------------------------------------------------------------------------
+def test_without_pruning_there_is_no_drift(backbone, geometry, clips):
+    """The dense path compared against itself has to coincide."""
+    report = measure_drift(backbone, clips, PruningPlan.dense(), geometry)
+    assert report.cosine_mean == pytest.approx(1.0, abs=1e-6)
+    assert report.relative_l2_mean == pytest.approx(0.0, abs=1e-6)
+
+
+def test_pruning_introduces_drift(backbone, geometry, clips):
+    plan = PruningPlan(retention=0.25, prune_layer=1)
+    assert measure_drift(backbone, clips, plan, geometry).relative_l2_mean > 0.0
+
+
+def test_pruning_more_drifts_more(backbone, geometry, clips):
+    mild = measure_drift(backbone, clips, PruningPlan(retention=0.75, prune_layer=1), geometry)
+    harsh = measure_drift(backbone, clips, PruningPlan(retention=0.125, prune_layer=1), geometry)
+    assert harsh.relative_l2_mean > mild.relative_l2_mean
+
+
+def test_the_report_counts_the_clips(backbone, geometry, clips):
+    assert measure_drift(backbone, clips, PruningPlan.dense(), geometry).clips == 6
+
+
+def test_the_worst_case_is_never_better_than_the_mean(backbone, geometry, clips):
+    """The mean hides the bad cases, which is why the extremes are reported."""
+    r = measure_drift(backbone, clips, PruningPlan(retention=0.25, prune_layer=1), geometry)
+    assert r.cosine_min <= r.cosine_p5 <= r.cosine_mean + 1e-9
+    assert r.relative_l2_p95 >= r.relative_l2_mean - 1e-9
+
+
+def test_measuring_with_no_clips_is_rejected(backbone, geometry):
+    empty = torch.empty(0, 3, geometry.frames_per_clip, geometry.image_size, geometry.image_size)
+    with pytest.raises(ValueError, match="at least one clip"):
+        measure_drift(backbone, empty, PruningPlan.dense(), geometry)
+
+
+# ---------------------------------------------------------------------------
+# Latency
+# ---------------------------------------------------------------------------
+def _measure(backbone, geometry, retentions):
+    return measure_latency(
+        backbone,
+        retentions,
+        geometry,
+        prune_layer=1,
+        batch=1,
+        warmup=1,
+        iterations=2,
+        device="cpu",
+        precision="off",
+        progress=lambda _: None,
+    )
+
+
+def test_one_point_per_requested_ratio(backbone, geometry):
+    assert [p.retention for p in _measure(backbone, geometry, [1.0, 0.5, 0.25])] == [1.0, 0.5, 0.25]
+
+
+def test_the_first_ratio_is_the_reference(backbone, geometry):
+    points = _measure(backbone, geometry, [1.0, 0.25])
+    assert points[0].measured_speedup == pytest.approx(1.0, abs=1e-6)
+
+
+def test_a_ratio_of_one_prunes_nothing(backbone, geometry):
+    point = _measure(backbone, geometry, [1.0])[0]
+    assert point.predicted_speedup == 1.0
+    assert point.prune_layer == 0
+
+
+def test_realisation_relates_measured_to_predicted():
+    point = LatencyPoint(
+        retention=0.25,
+        prune_layer=2,
+        ms_per_clip=10.0,
+        clips_per_second=100.0,
+        peak_memory_gb=1.0,
+        predicted_speedup=4.0,
+        measured_speedup=2.0,
+    )
+    assert point.realisation == pytest.approx(0.5)
+    assert "50% realised" in point.describe()
+
+
+def test_an_empty_list_of_ratios_is_rejected(backbone, geometry):
+    with pytest.raises(ValueError, match="at least one"):
+        measure_latency(backbone, [], geometry, device="cpu")
+
+
+def test_an_unknown_precision_is_rejected(backbone, geometry):
+    with pytest.raises(ValueError, match="precision"):
+        measure_latency(
+            backbone,
+            [1.0],
+            geometry,
+            batch=1,
+            warmup=0,
+            iterations=1,
+            device="cpu",
+            precision="fp8",
+            progress=lambda _: None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+def test_identical_norms_raise_a_warning():
+    """All norms equal means the backbone is not responding to content."""
+    assert "WARNING" in "\n".join(EmbeddingSummary.of(np.tile(np.ones(8), (5, 1))).describe())
+
+
+def test_non_finite_values_raise_a_warning():
+    broken = np.ones((4, 8))
+    broken[2, 3] = np.nan
+    summary = EmbeddingSummary.of(broken)
+    assert not summary.all_finite
+    assert "non-finite" in "\n".join(summary.describe())
+
+
+def test_healthy_embeddings_raise_no_warning():
+    healthy = np.random.default_rng(1).normal(size=(10, 32))
+    assert "WARNING" not in "\n".join(EmbeddingSummary.of(healthy).describe())
+
+
+def test_repeated_clips_have_maximum_similarity():
+    repeated = np.tile(np.arange(8.0), (5, 1))
+    assert EmbeddingSummary.of(repeated).consecutive_similarity_mean == pytest.approx(1.0)
+
+
+def test_a_single_clip_does_not_break_the_similarity():
+    assert EmbeddingSummary.of(np.ones((1, 8))).consecutive_similarity_mean == 1.0
+
+
+def test_the_pruning_summary_reports_the_reduction(backbone, geometry, clips):
+    plan = PruningPlan(retention=0.25, prune_layer=1)
+    selection = PrunedEncoder(backbone, geometry, plan).select(clips[:2])
+    summary = summarise_pruning(selection, geometry, top_rows=2)
+
+    assert summary.tokens_before == geometry.num_tokens
+    assert summary.tokens_after == geometry.kept_tokens(0.25)
+    assert summary.token_reduction == pytest.approx(4.0, rel=0.05)
+    assert summary.mean_merge_size == pytest.approx(4.0, rel=0.01)
+
+
+def test_budget_concentrated_on_the_top_is_flagged():
+    summary = PruningSummary(
+        tokens_before=2048,
+        tokens_after=512,
+        kept_per_slice=64,
+        tokens_per_slice=256,
+        mean_merge_size=4.0,
+        largest_merge_size=40,
+        top_rows_budget_share=0.60,
+        top_rows_screen_share=0.25,
+    )
+    assert "favouring the top" in "\n".join(summary.describe())
+
+
+def test_budget_avoiding_the_top_is_flagged():
+    summary = PruningSummary(
+        tokens_before=2048,
+        tokens_after=512,
+        kept_per_slice=64,
+        tokens_per_slice=256,
+        mean_merge_size=4.0,
+        largest_merge_size=64,
+        top_rows_budget_share=0.02,
+        top_rows_screen_share=0.25,
+    )
+    assert "avoiding the top" in "\n".join(summary.describe())
+
+
+def _report(pruning=None):
+    return RunReport(
+        video="/tmp/x.mp4",
+        plan="retention 25% after block 2",
+        geometry="patch 14px",
+        embeddings=EmbeddingSummary.of(np.random.default_rng(2).normal(size=(6, 16))),
+        timing=TimingSummary(read_seconds=1.0, encode_seconds=8.0, clips=6, predicted_speedup=3.9),
+        pruning=pruning,
+        output_files=["x.npz"],
+    )
+
+
+def test_without_a_baseline_realisation_is_unknown():
+    timing = TimingSummary(read_seconds=1.0, encode_seconds=10.0, clips=5, predicted_speedup=4.0)
+    assert timing.realisation is None
+    assert "not measured" in "\n".join(timing.describe())
+
+
+def test_the_report_states_that_it_does_not_recognise_actions():
+    """Without that note, a reader would expect labels and intervals in the output."""
+    assert "temporal model" in _report().render()
+
+
+def test_the_report_omits_the_pruning_section_on_the_dense_path():
+    assert "Pruning" not in _report().render()
+
+
+def test_the_report_becomes_a_dictionary_with_derived_fields(backbone, geometry, clips):
+    plan = PruningPlan(retention=0.25, prune_layer=1)
+    selection = PrunedEncoder(backbone, geometry, plan).select(clips[:2])
+    data = _report(summarise_pruning(selection, geometry, 2)).to_dict()
+
+    assert "seconds_per_clip" in data["timing"]
+    assert "realisation" in data["timing"]
+    assert "token_reduction" in data["pruning"]
