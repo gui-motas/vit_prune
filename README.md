@@ -16,7 +16,7 @@ The backbone is never modified and never trained. You swap one call:
 from vitprune.core import ClipGeometry, PrunedEncoder, PruningPlan
 
 encoder = PrunedEncoder(backbone, ClipGeometry.videomae_giant(), PruningPlan(retention=0.25))
-features = encoder.encode(clips)          # instead of backbone.forward_features(clips)
+features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 ```
 
 ## Installation
@@ -39,9 +39,9 @@ your backbone was built with.
 ```python
 from vitprune.core import ClipGeometry
 
-geometry = ClipGeometry.videomae_giant()      # 224/14, tubelet 2, 1408 dims, 40 blocks
-geometry = ClipGeometry.videomae_large()      # 224/16, tubelet 2, 1024 dims, 24 blocks
-geometry = ClipGeometry.image_vit(...)        # single temporal slice, no motion term
+geometry = ClipGeometry.videomae_giant()  # 224/14, tubelet 2, 1408 dims, 40 blocks
+geometry = ClipGeometry.videomae_large()  # 224/16, tubelet 2, 1024 dims, 24 blocks
+geometry = ClipGeometry.image_vit(...)  # single temporal slice, no motion term
 ```
 
 **2. Check that your backbone is compatible.** This is the step to not skip.
