@@ -12,7 +12,7 @@ geometry = ClipGeometry.videomae_giant()
 check_backbone(backbone, geometry, reference=backbone.forward_features)
 
 encoder = PrunedEncoder(backbone, geometry, PruningPlan(retention=0.25))
-features = encoder.encode(clips)          # instead of backbone.forward_features(clips)
+features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 ```
 
 The backbone is not modified and not trained.
@@ -68,9 +68,9 @@ can verify it.
 `ClipGeometry` must predict exactly how many tokens `patch_embed` produces.
 
 ```python
-ClipGeometry.videomae_giant()      # 224/14, tubelet 2, 1408 dims, 40 blocks
-ClipGeometry.videomae_large()      # 224/16, tubelet 2, 1024 dims, 24 blocks
-ClipGeometry.image_vit(224, 16, 768, 12, 12)   # one temporal slice
+ClipGeometry.videomae_giant()  # 224/14, tubelet 2, 1408 dims, 40 blocks
+ClipGeometry.videomae_large()  # 224/16, tubelet 2, 1024 dims, 24 blocks
+ClipGeometry.image_vit(224, 16, 768, 12, 12)  # one temporal slice
 ```
 
 For an image transformer, `image_vit` models the input as a clip with a single
