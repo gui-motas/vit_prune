@@ -71,10 +71,9 @@ def score_tokens(
 def _uniqueness(values: torch.Tensor) -> torch.Tensor:
     """How far each token departs from its context.
 
-    Measured at two levels and summed: against the mean of the whole clip, which
-    captures what is rare overall, and against the mean of its own temporal slice,
-    which captures what is rare at that instant. A token scores high only when it
-    stands out at both levels.
+    Measured at two levels and summed: against the mean of the whole clip and
+    against the mean of its temporal slice. This favours deviation at both levels,
+    but the sum is not a logical requirement that both terms be large.
     """
     batch, _, _, dim = values.shape
 
@@ -127,6 +126,8 @@ def _combine(uniqueness: torch.Tensor, motion: torch.Tensor, weight: float) -> t
 
 def _apply_prior(score: torch.Tensor, prior: torch.Tensor) -> torch.Tensor:
     tokens = score.shape[-1]
+    if prior.ndim != 1 or not torch.isfinite(prior).all() or (prior < 0).any():
+        raise ValueError("spatial prior must be one-dimensional, finite and non-negative")
     if prior.numel() != tokens:
         raise ValueError(
             f"the spatial prior has {prior.numel()} positions but a slice holds {tokens} tokens"

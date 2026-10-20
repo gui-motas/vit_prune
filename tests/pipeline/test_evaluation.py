@@ -10,10 +10,12 @@ pytest.importorskip("yaml")
 import yaml
 
 from vitprune.pipeline.evaluation import (
+    EVALUATION_MANIFEST,
     PREPARED_CONFIG,
     DownstreamModel,
     EvaluationRequest,
     build_command,
+    evaluate,
     prepare_config,
     resolve_stride,
 )
@@ -201,3 +203,54 @@ def test_missing_downstream_weights_are_rejected(downstream, features, tmp_path)
     downstream.weights.unlink()
     with pytest.raises(FileNotFoundError, match="downstream model weights"):
         prepare_config(EvaluationRequest(features, downstream, tmp_path / "out"))
+
+
+def test_frame_step_mismatch_aborts(downstream, features, tmp_path):
+    Manifest(settings={"stride": 16, "frame_step": 2}).write(features)
+    with pytest.raises(ValueError, match="frame_step.*disagrees"):
+        prepare_config(EvaluationRequest(features, downstream, tmp_path / "out", frame_step=1))
+
+
+def test_frame_step_is_checked_when_declared_by_the_model(downstream, features, tmp_path):
+    Manifest(settings={"stride": 16, "frame_step": 2}).write(features)
+    config = yaml.safe_load(downstream.config.read_text(encoding="utf-8"))
+    config["dataset"]["frame_step"] = 1
+    downstream.config.write_text(yaml.safe_dump(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="frame_step.*disagrees"):
+        prepare_config(EvaluationRequest(features, downstream, tmp_path / "out"))
+
+
+def test_frame_step_assertion_requires_a_record(downstream, features, tmp_path):
+    with pytest.raises(ValueError, match="no value recorded"):
+        prepare_config(EvaluationRequest(features, downstream, tmp_path / "out", frame_step=2))
+
+
+def test_input_width_mismatch_aborts(downstream, features, tmp_path):
+    Manifest(settings={"stride": 16, "geometry": {"embed_dim": 1024}}).write(features)
+    with pytest.raises(ValueError, match="input_dim"):
+        prepare_config(EvaluationRequest(features, downstream, tmp_path / "out"))
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_evaluation_records_command_inputs_and_exit_status(
+    downstream, features, tmp_path, monkeypatch, code
+):
+    import json
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "vitprune.pipeline.evaluation.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=code),
+    )
+    out = tmp_path / "out"
+    request = EvaluationRequest(features, downstream, out)
+    if code:
+        with pytest.raises(RuntimeError, match="exited"):
+            evaluate(request)
+    else:
+        assert evaluate(request) == out
+    record = json.loads((out / EVALUATION_MANIFEST).read_text(encoding="utf-8"))
+    assert record["statistics"]["returncode"] == code
+    assert record["settings"]["prepared_config"]["sha256"]
+    assert record["settings"]["extraction_manifest"]["settings"]["retention"] == 0.25
+    assert record["weights"]["sha256"]

@@ -36,14 +36,15 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vitprune.pipeline.provenance import read_manifest
+from vitprune.pipeline.provenance import Manifest, SourceFile, read_manifest
 
 #: Name given to the prepared copy of the configuration, inside the results folder.
 PREPARED_CONFIG = "prepared-config.yaml"
+EVALUATION_MANIFEST = "evaluation-manifest.json"
 
 
 @dataclass
@@ -86,6 +87,7 @@ class EvaluationRequest:
     labels: Path | None = None
     stride: int | None = None
     extra_arguments: list[str] = field(default_factory=list)
+    frame_step: int | None = None
 
     def __post_init__(self) -> None:
         self.features = Path(self.features).resolve()
@@ -117,6 +119,7 @@ def prepare_config(request: EvaluationRequest) -> Path:
     dataset["feat_stride"] = stride
     if request.labels is not None:
         dataset["json_file"] = str(request.labels)
+    _validate_protocol(request, dataset)
 
     request.destination.mkdir(parents=True, exist_ok=True)
     prepared = request.destination / PREPARED_CONFIG
@@ -141,6 +144,8 @@ def resolve_stride(request: EvaluationRequest) -> int:
                 f"no stride recorded in {request.features} and none supplied. Without "
                 f"it, clip indices are converted into timestamps at the wrong scale."
             )
+        if recorded < 1:
+            raise ValueError("recorded stride must be positive")
         return recorded
 
     if recorded is not None and recorded != request.stride:
@@ -149,7 +154,30 @@ def resolve_stride(request: EvaluationRequest) -> int:
             f"at extraction ({recorded}). Evaluating like this shifts every predicted "
             f"interval in time and degrades accuracy for a reason unrelated to pruning."
         )
+    if request.stride < 1:
+        raise ValueError("stride must be positive")
     return request.stride
+
+
+def _validate_protocol(request: EvaluationRequest, dataset: dict) -> None:
+    """Check declared temporal sampling and feature width without guessing a model's schema."""
+    try:
+        settings = read_manifest(request.features).get("settings", {})
+    except FileNotFoundError:
+        settings = {}
+    recorded = settings.get("frame_step")
+    for expected in (request.frame_step, dataset.get("frame_step")):
+        if expected is None:
+            continue
+        if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1:
+            raise ValueError("frame_step must be a positive integer")
+        if recorded is None:
+            raise ValueError("cannot verify frame_step: no value recorded at extraction")
+        if expected != recorded:
+            raise ValueError(f"frame_step ({expected}) disagrees with extraction ({recorded})")
+    width = settings.get("geometry", {}).get("embed_dim")
+    if width is not None and "input_dim" in dataset and dataset["input_dim"] != width:
+        raise ValueError("dataset.input_dim disagrees with the extraction embed_dim")
 
 
 def build_command(request: EvaluationRequest, prepared_config: Path) -> list[str]:
@@ -173,12 +201,45 @@ def evaluate(request: EvaluationRequest, progress=print) -> Path:
     """
     prepared = prepare_config(request)
     command = build_command(request, prepared)
+    try:
+        extraction = read_manifest(request.features)
+    except FileNotFoundError:
+        extraction = None
+    record = Manifest(
+        settings={
+            "stage": "evaluation",
+            "features": str(request.features),
+            "stride": resolve_stride(request),
+            "asserted_frame_step": request.frame_step,
+            "command": command,
+            "source_config": asdict(SourceFile.of(request.model.config)),
+            "prepared_config": asdict(SourceFile.of(prepared)),
+            "labels": asdict(SourceFile.of(request.labels)) if request.labels else None,
+            "entry_point": asdict(SourceFile.of(
+                request.model.project_dir / request.model.entry_point
+            )),
+            "extraction_manifest": extraction,
+        },
+        weights=SourceFile.of(request.model.weights),
+        statistics={"status": "started"},
+    )
+    record.write(request.destination, EVALUATION_MANIFEST)
 
     progress(f"[evaluate] embeddings: {request.features}")
     progress(f"[evaluate] prepared configuration: {prepared}")
     progress(f"[evaluate] running: {' '.join(command)}")
 
-    finished = subprocess.run(command, cwd=request.model.project_dir)
+    try:
+        finished = subprocess.run(command, cwd=request.model.project_dir, check=False)
+    except OSError:
+        record.statistics = {"status": "launch_failed"}
+        record.write(request.destination, EVALUATION_MANIFEST)
+        raise
+    record.statistics = {
+        "status": "finished" if finished.returncode == 0 else "failed",
+        "returncode": finished.returncode,
+    }
+    record.write(request.destination, EVALUATION_MANIFEST)
     if finished.returncode != 0:
         raise RuntimeError(
             f"the downstream model exited with code {finished.returncode}. "

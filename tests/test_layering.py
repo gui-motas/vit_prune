@@ -86,9 +86,8 @@ def test_core_does_not_import_the_optional_dependencies():
             assert not (set(names) & optional), f"{module.name} imports {set(names) & optional}"
 
 
-def test_the_cost_model_does_not_require_torch():
-    """cost and hardware have to work in an environment without torch, so that an
-    estimate is available before any machine is booked."""
+def test_cost_and_hardware_do_not_directly_import_torch():
+    """The formulas do not run torch operations; importing the package still needs torch."""
     for name in ("cost.py", "hardware.py"):
         tree = ast.parse((SRC / "bench" / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -96,3 +95,25 @@ def test_the_cost_model_does_not_require_torch():
                 assert all(a.name != "torch" for a in node.names), f"{name} imports torch"
             elif isinstance(node, ast.ImportFrom) and node.module:
                 assert not node.module.startswith("torch"), f"{name} imports torch"
+
+
+def test_public_library_imports_do_not_load_pipeline_extras():
+    import subprocess
+    import sys
+
+    script = f"""
+import importlib.abc
+import sys
+sys.path.insert(0, {str(SRC.parent)!r})
+class BlockOptional(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {{'cv2', 'yaml', 'decord'}}:
+            raise ImportError('optional dependency blocked: ' + fullname)
+sys.meta_path.insert(0, BlockOptional())
+from vitprune import ClipGeometry, PrunedEncoder, PruningPlan, check_backbone
+from vitprune.bench import clip_cost
+assert clip_cost(ClipGeometry.videomae_giant(), 0.25, 2).predicted_speedup > 1
+assert 'vitprune.pipeline' not in sys.modules
+"""
+    result = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

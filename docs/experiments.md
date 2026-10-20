@@ -26,14 +26,15 @@ dataset is available.
 ### 1. Sanity check
 
 ```bash
-vitprune drift --videos any_folder --weights w.pth --model-source /path \
-    --retention 1.0 --clips 20
+vitprune check --weights w.pth --model-source /path
 ```
 
-Without pruning, drift must be zero. **If it is not, stop.** There is a defect, and
-anything measured afterwards would be ambiguous.
+This compares the dense encoder to the backbone's original `forward_features`.
+**If it fails, stop.** Model commands perform the same check automatically.
+`drift --retention 1.0` only compares the encoder to itself; zero drift cannot rule
+out a defect shared by both paths. Direct Python users must supply their reference.
 
-Needs: no labels, no dataset.
+Needs: weights and the external model definition, but no labels, dataset or video.
 
 ### 2. Analytic cost
 
@@ -43,7 +44,7 @@ vitprune cost --gpu h100-sxm --retention 1.0 0.5 0.35 0.25 0.15 --hours 7.2
 
 Produces the denominator of the main metric.
 
-Needs: no GPU, no checkpoint, no video, not even torch.
+Needs: base dependencies including torch; no GPU, checkpoint or video.
 
 ### 3. Wall-clock
 
@@ -129,8 +130,14 @@ numbers describe different code paths.
 **Record the environment.** The manifest captures versions and machine
 automatically. Confirm that `evaluate` did not complain about a stride mismatch.
 
-**No retraining means no run-to-run variance.** With frozen models the path is
-deterministic, so repeated seeds are unnecessary. One dimension fewer in the matrix.
+**Frozen models remove training-seed variance, not all variance.** GPU reductions,
+ties in ranking and kernel selection can remain nondeterministic. Repeat timing
+measurements and report dispersion; record the software and hardware environment.
+The benchmark reports an average, not a confidence interval.
+
+The latency sweep must start at retention `1.0`, so measured and analytic speedups
+share a dense denominator. `run --compare` has no warmup and is exploratory only.
+CPU execution does not apply CUDA autocast even when fp16/bf16 was requested.
 
 ## Reading realisation
 
@@ -151,9 +158,10 @@ Causes worth investigating when it is low:
 - **No fast kernel.** An operation cheap in multiplies may have no optimised
   implementation on the target hardware.
 
-### A worked reference
+### Historical reported reference — not revalidated
 
-On a sixteen-core CPU, 35 clips from a 19-second video, VideoMAE Giant:
+The earlier documentation reports 35 clips from a 19-second video on a sixteen-core
+CPU with VideoMAE Giant. Original outputs are not present in this checkout:
 
 | | Dense | Pruned at 0.25 |
 |---|---|---|
@@ -162,10 +170,9 @@ On a sixteen-core CPU, 35 clips from a 19-second video, VideoMAE Giant:
 
 Measured 4.00x against 3.93x predicted -- **102% realisation**.
 
-That figure is specific to a CPU and **should not be generalised**. A CPU does not
-have the weight-reading bottleneck that dominates on a GPU, and the sorting cost is
-diluted in a regime where each block already costs a great deal. It demonstrates that
-the path works; it does not predict GPU behaviour.
+These are historical claims, not new measurements or a reproducible result of this
+checkout. They must not be generalised to GPU. Both CPUs and GPUs may be limited by
+memory; the roofline here is a simplified model, not a hardware diagnosis.
 
 In the same run, mean cosine drift was 0.81 with a worst case of 0.24 -- substantial
 -- and the downstream model still returned the same answer. That is empirical support

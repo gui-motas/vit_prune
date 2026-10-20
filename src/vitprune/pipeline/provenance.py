@@ -15,10 +15,12 @@ without having to guess.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +34,17 @@ class SourceFile:
     path: str
     bytes: int
     modified: str
+    sha256: str = ""
 
     @classmethod
     def of(cls, path: str | Path) -> SourceFile:
         info = Path(path).stat()
         stamp = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
-        return cls(str(Path(path).resolve()), info.st_size, stamp.isoformat())
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return cls(str(Path(path).resolve()), info.st_size, stamp.isoformat(), digest.hexdigest())
 
 
 @dataclass
@@ -51,6 +58,7 @@ class Manifest:
     outputs: dict[str, Any] = field(default_factory=dict)
     statistics: dict[str, Any] = field(default_factory=dict)
     created: str = ""
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
         if not self.created:
@@ -58,8 +66,8 @@ class Manifest:
         if not self.environment:
             self.environment = describe_environment()
 
-    def write(self, folder: str | Path) -> Path:
-        destination = Path(folder) / MANIFEST_NAME
+    def write(self, folder: str | Path, name: str = MANIFEST_NAME) -> Path:
+        destination = Path(folder) / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         return destination
@@ -87,6 +95,17 @@ def describe_environment() -> dict[str, Any]:
         "system": platform.system(),
         "machine": platform.machine(),
     }
+    for package in ("vitprune", "numpy", "PyYAML", "opencv-python"):
+        try:
+            info[package] = version(package)
+        except PackageNotFoundError:
+            info[package] = None
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        digest.update(path.read_bytes() + b"\0")
+    info["vitprune_source_sha256"] = digest.hexdigest()
     try:
         import torch
 

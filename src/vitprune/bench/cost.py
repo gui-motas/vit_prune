@@ -1,8 +1,8 @@
 """What pruning should save, according to an operation count.
 
-Nothing runs here. This module counts multiply-accumulate operations. It works with
-no GPU, no checkpoint and without ``torch`` being importable, so that an estimate is
-available before any machine time is booked.
+Nothing runs here. This module counts multiply-accumulate operations. No GPU or
+checkpoint is needed, but the package's base dependencies (including torch) must be
+installed. This file itself contains no torch operations.
 
 Two caveats worth more than the numbers produced here.
 
@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from vitprune.bench.hardware import Accelerator
-from vitprune.core.geometry import ClipGeometry
+from vitprune.core.geometry import ClipGeometry, validate_prune_layer, validate_retention
 
 #: One multiply-accumulate is two floating point operations.
 FLOPS_PER_MAC = 2
@@ -100,8 +100,11 @@ def clip_cost(geometry: ClipGeometry, retention: float, prune_layer: int) -> Cli
 
     The per-block count sums three parts: producing query, key and value; comparing
     every token against every other; and the feed-forward layer. Only the second
-    grows with the square of the token count, and most of the saving comes from it.
+    grows with the square of the token count. Linear projections and the MLP can
+    dominate the total for wide backbones; fewer attention pairs are not total speedup.
     """
+    validate_retention(retention)
+    validate_prune_layer(prune_layer, geometry.depth)
     dense = _accumulate(geometry, retention=1.0, prune_layer=0)
     pruned = _accumulate(geometry, retention, prune_layer)
     prunes = prune_layer > 0 and retention < 1.0

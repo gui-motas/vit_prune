@@ -66,9 +66,9 @@ def merge_tokens(
     Returns:
         A :class:`MergedTokens`.
 
-    Kept tokens come out in grid order, not score order. That matters because the
-    positional embedding has already been added; reordering by score would scramble
-    it.
+    Kept tokens come out in grid order, not score order, for predictable inspection.
+    Absolute positions already travel with each token; a consistent permutation is
+    not intrinsically invalid for permutation-equivariant attention and mean pooling.
     """
     _check_shapes(tokens, sizes, scores)
     total = tokens.shape[2]

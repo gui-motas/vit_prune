@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 
 import torch
 
@@ -47,15 +48,18 @@ class CompatibilityReport:
     tokens_expected: int
     dense_matches_reference: bool | None
     max_difference: float | None
+    error: str | None = None
 
     @property
     def ok(self) -> bool:
         grid_ok = self.tokens_produced == self.tokens_expected
-        behaviour_ok = self.dense_matches_reference is not False
-        return self.structure_ok and grid_ok and behaviour_ok
+        behaviour_ok = self.dense_matches_reference is True
+        return self.structure_ok and grid_ok and behaviour_ok and self.error is None
 
     def describe(self) -> str:
         lines = []
+        if self.error:
+            lines.append(f"contract: {self.error}")
         if self.missing:
             lines.append(f"missing required attributes: {', '.join(self.missing)}")
         else:
@@ -76,7 +80,8 @@ class CompatibilityReport:
                 f"behaviour: dense path matches reference (max diff {self.max_difference:.2e})"
             )
         else:
-            lines.append(f"behaviour: DIFFERS from reference (max diff {self.max_difference:.2e})")
+            detail = "unavailable" if self.max_difference is None else f"{self.max_difference:.2e}"
+            lines.append(f"behaviour: DIFFERS from reference (max diff {detail})")
         return "\n".join(lines)
 
 
@@ -85,7 +90,7 @@ def check_backbone(
     geometry: ClipGeometry | None = None,
     reference: Callable[[torch.Tensor], torch.Tensor] | None = None,
     tolerance: float = DEFAULT_TOLERANCE,
-    device: str = "cpu",
+    device: str | None = None,
     raise_on_failure: bool = True,
 ) -> CompatibilityReport:
     """Verify that a backbone can be driven by :class:`~vitprune.core.encoder.PrunedEncoder`.
@@ -97,7 +102,7 @@ def check_backbone(
             ``backbone.forward_features``. Supplying it is what enables the
             behaviour check, which is the part worth having.
         tolerance: maximum absolute difference accepted in that comparison.
-        device: where to run the probe.
+        device: where to run the probe; defaults to the backbone's device.
         raise_on_failure: raise instead of returning a failed report.
 
     Returns:
@@ -110,9 +115,37 @@ def check_backbone(
     wiring, not accuracy, and wiring does not depend on the content.
     """
     geometry = geometry or ClipGeometry.videomae_giant()
+    if not isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be finite and non-negative")
     missing = missing_attributes(backbone)
-
-    report = _run_checks(backbone, geometry, reference, tolerance, device, missing)
+    device = torch.device(device) if device is not None else _device_of(backbone)
+    modes = [(module, module.training) for module in backbone.modules()]
+    gradients = [(parameter, parameter.requires_grad) for parameter in backbone.parameters()]
+    cuda_devices = (
+        [device.index if device.index is not None else torch.cuda.current_device()]
+        if device.type == "cuda" else []
+    )
+    try:
+        with torch.random.fork_rng(devices=cuda_devices):
+            backbone.eval()
+            try:
+                report = _run_checks(backbone, geometry, reference, tolerance, device, missing)
+            except (ValueError, RuntimeError, TypeError, AttributeError) as problem:
+                report = CompatibilityReport(
+                    structure_ok=not missing,
+                    missing=missing,
+                    optional_present=present_optional(backbone),
+                    tokens_produced=None,
+                    tokens_expected=geometry.num_tokens,
+                    dense_matches_reference=False,
+                    max_difference=None,
+                    error=str(problem),
+                )
+    finally:
+        for parameter, requires_grad in gradients:
+            parameter.requires_grad_(requires_grad)
+        for module, training in modes:
+            module.training = training
 
     if raise_on_failure and not report.ok:
         raise ValueError(
@@ -158,7 +191,15 @@ def _count_tokens(backbone, probe: torch.Tensor) -> int:
     out = backbone.patch_embed(probe)
     if out.dim() == 5:
         out = out.flatten(2).transpose(1, 2)
+    if out.ndim != 3:
+        raise ValueError("patch_embed must return [B,L,D] or [B,D,S,H,W]")
     return int(out.shape[1])
+
+
+def _device_of(backbone: torch.nn.Module) -> torch.device:
+    for tensor in (*backbone.parameters(), *backbone.buffers()):
+        return tensor.device
+    return torch.device("cpu")
 
 
 def _dtype_of(backbone: torch.nn.Module) -> torch.dtype:
@@ -182,5 +223,9 @@ def _compare_dense(backbone, geometry, probe, reference, tolerance):
         expected = expected[0]
 
     actual = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(probe)
+    if not isinstance(expected, torch.Tensor) or expected.shape != actual.shape:
+        raise ValueError(f"reference must return clip embeddings shaped {tuple(actual.shape)}")
+    if not torch.isfinite(expected).all() or not torch.isfinite(actual).all():
+        return False, float("inf")
     difference = float((expected - actual).abs().max())
     return difference <= tolerance, difference

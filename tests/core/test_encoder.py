@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from vitprune.core.encoder import PrunedEncoder, PruningPlan
-from vitprune.core.geometry import ClipGeometry
 from vitprune.core.priors import top_rows_prior
 from vitprune.core.testing import reference_backbone, reference_encode, reference_geometry
 
@@ -57,12 +56,22 @@ def test_pruning_changes_the_embedding(backbone, geometry, clips):
 def test_pruning_after_the_last_block_leaves_the_embedding_almost_unchanged(
     backbone, geometry, clips
 ):
-    """With no blocks left after the merge, the pooling identity shows through
-    end to end."""
+    """With an identity token norm and no remaining blocks, the identity holds."""
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
     plan = PruningPlan(retention=0.25, prune_layer=geometry.depth)
     late = PrunedEncoder(backbone, geometry, plan).encode(clips)
     assert torch.allclose(dense, late, atol=1e-10)
+
+
+def test_nonlinear_token_norm_can_break_final_equivalence_even_after_the_last_block(
+    backbone, geometry, clips
+):
+    backbone.norm = torch.nn.LayerNorm(geometry.embed_dim).double()
+    dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
+    late = PrunedEncoder(
+        backbone, geometry, PruningPlan(prune_layer=geometry.depth)
+    ).encode(clips)
+    assert not torch.allclose(dense, late, atol=1e-8)
 
 
 def test_pruning_early_drifts_more_than_pruning_late(backbone, geometry, clips):
@@ -127,8 +136,9 @@ def test_the_backbone_is_frozen(backbone, geometry):
     assert all(not p.requires_grad for p in backbone.parameters())
 
 
-def test_the_default_geometry_is_the_giant():
-    assert PrunedEncoder(reference_backbone()).geometry.num_tokens == ClipGeometry().num_tokens
+def test_default_giant_geometry_does_not_silently_accept_a_toy_backbone():
+    with pytest.raises(ValueError, match="depth"):
+        PrunedEncoder(reference_backbone())
 
 
 def test_the_dense_plan_describes_itself_as_the_baseline():
@@ -140,3 +150,78 @@ def test_setting_retention_to_one_yields_the_dense_plan():
     plan = PruningPlan(retention=0.25, prune_layer=3)
     assert not plan.with_retention(1.0).prunes
     assert plan.with_retention(0.5).prune_layer == 3
+
+
+@pytest.mark.parametrize("retention", [0, -0.1, 1.1, float("nan"), float("inf"), True])
+def test_invalid_retention_is_rejected_at_construction(retention):
+    with pytest.raises(ValueError, match="retention"):
+        PruningPlan(retention=retention)
+    with pytest.raises(ValueError, match="retention"):
+        PruningPlan().with_retention(retention)
+
+
+@pytest.mark.parametrize("layer", [-1, 1.5, True])
+def test_invalid_layer_is_rejected(layer):
+    with pytest.raises(ValueError, match="prune_layer"):
+        PruningPlan(prune_layer=layer)
+
+
+@pytest.mark.parametrize("retention", [0.25, 1.0])
+def test_cut_past_the_backbone_is_rejected_even_when_dense(backbone, geometry, retention):
+    with pytest.raises(ValueError, match="exceeds"):
+        PrunedEncoder(backbone, geometry, PruningPlan(retention=retention, prune_layer=100))
+
+
+def test_encode_and_select_reject_a_replaced_invalid_plan(backbone, geometry, clips):
+    encoder = PrunedEncoder(backbone, geometry)
+    encoder.plan = PruningPlan(prune_layer=100)
+    for operation in (encoder.encode, encoder.select):
+        with pytest.raises(ValueError, match="exceeds"):
+            operation(clips)
+
+
+def test_construction_sets_eval_without_changing_weight_values(backbone, geometry):
+    backbone.train()
+    before = {name: value.clone() for name, value in backbone.state_dict().items()}
+    encoder = PrunedEncoder(backbone, geometry)
+    assert not encoder.training
+    assert all(not module.training for module in backbone.modules())
+    assert all(torch.equal(before[name], value) for name, value in backbone.state_dict().items())
+
+
+def test_training_mode_is_rejected(backbone, geometry, clips):
+    encoder = PrunedEncoder(backbone, geometry).train()
+    for operation in (encoder.encode, encoder.select):
+        with pytest.raises(ValueError, match="inference-only"):
+            operation(clips)
+
+
+def test_patch_embedding_width_is_checked(backbone, geometry, clips):
+    backbone.patch_embed = torch.nn.Identity()
+    with pytest.raises(ValueError, match="width"):
+        PrunedEncoder(backbone, geometry).encode(clips)
+
+
+def test_input_shape_is_checked(backbone, geometry, clips):
+    with pytest.raises(ValueError, match="shape"):
+        PrunedEncoder(backbone, geometry).encode(clips[:, :, 0])
+
+
+def test_size_biased_attention_requires_a_videomae_block(geometry):
+    backbone = reference_backbone(geometry)
+    backbone.blocks[-1] = torch.nn.Identity()
+    with pytest.raises(ValueError, match="size-biased attention"):
+        PrunedEncoder(backbone, geometry, PruningPlan(size_biased_attention=True))
+
+
+@pytest.mark.parametrize("prior", [torch.ones(2, 2), torch.tensor([float("nan")]),
+                                   torch.tensor([-0.1])])
+def test_invalid_prior_is_rejected_at_construction(prior):
+    with pytest.raises(ValueError, match="spatial_prior"):
+        PruningPlan(spatial_prior=prior)
+
+
+@pytest.mark.parametrize("weight", [-0.1, 1.1, float("nan"), float("inf"), "0.5", True])
+def test_invalid_motion_weight_is_rejected_at_construction(weight):
+    with pytest.raises(ValueError, match="motion_weight"):
+        PruningPlan(motion_weight=weight)

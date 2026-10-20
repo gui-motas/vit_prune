@@ -76,3 +76,17 @@ def test_geometry_is_immutable():
 
 def test_clip_length_can_be_overridden_on_the_named_constructor():
     assert ClipGeometry.videomae_giant(frames_per_clip=32).temporal_slices == 16
+
+
+@pytest.mark.parametrize("name", ["image_size", "patch_size", "tubelet_size",
+                                  "frames_per_clip", "embed_dim", "depth", "heads"])
+@pytest.mark.parametrize("value", [0, -1, 1.5, True])
+def test_geometry_counts_must_be_positive_integers(name, value):
+    with pytest.raises(ValueError, match=name):
+        ClipGeometry(**{name: value})
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_mlp_ratio_must_be_finite_and_positive(value):
+    with pytest.raises(ValueError, match="mlp_ratio"):
+        ClipGeometry(mlp_ratio=value)

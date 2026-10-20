@@ -13,6 +13,8 @@ anything downstream, which is the premise of the whole experiment.
 from __future__ import annotations
 
 import time
+from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +40,7 @@ def extract_folder(
     precision: str = "fp16",
     weights_path: str | Path | None = None,
     progress=print,
+    model_source: str | Path | None = None,
 ) -> Path:
     """Process every video in a folder and write the run record.
 
@@ -53,15 +56,24 @@ def extract_folder(
             timing, or the two numbers describe different code paths.
         weights_path: the checkpoint, recorded in the manifest for traceability.
         progress: where to send progress output.
+        model_source: optional external source folder, fingerprinted for provenance.
 
     Returns:
         The path of the written record.
     """
     found = find_videos(videos)
     if not found:
-        raise SystemExit(f"no video found in {videos}")
+        raise FileNotFoundError(f"no video found in {videos}")
+    duplicates = [stem for stem, count in Counter(p.stem.casefold() for p in found).items()
+                  if count > 1]
+    if duplicates:
+        raise ValueError(f"video stems must be unique; duplicate output names: {duplicates}")
+    _validate_encoding(batch, precision)
 
     destination = Path(destination)
+    existing = [p for p in (destination / f"{video.stem}.npz" for video in found) if p.exists()]
+    if existing or (destination / "manifest.json").exists():
+        raise FileExistsError(f"destination already contains extraction outputs: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
 
     started = time.time()
@@ -76,6 +88,8 @@ def extract_folder(
         elapsed = time.time() - moment
         per_video[video.stem] = {
             "path": str(video),
+            "source": asdict(SourceFile.of(video)),
+            "feature_file": asdict(SourceFile.of(destination / f"{video.stem}.npz")),
             "clips": int(embeddings.shape[0]),
             "embed_dim": int(embeddings.shape[1]),
             "seconds": round(elapsed, 2),
@@ -96,6 +110,7 @@ def extract_folder(
         device,
         precision,
         weights_path,
+        model_source,
     )
     written = manifest.write(destination)
     progress(
@@ -135,6 +150,9 @@ def encode_clips(
     precision: str = "fp16",
 ) -> np.ndarray:
     """Run the clips through the encoder in batches."""
+    _validate_encoding(batch, precision)
+    if clips.shape[0] < 1:
+        raise ValueError("at least one clip is needed to encode")
     dtype = _precision(precision)
     on_gpu = str(device).startswith("cuda")
     pieces = []
@@ -142,7 +160,10 @@ def encode_clips(
     for start in range(0, clips.shape[0], batch):
         chunk = clips[start : start + batch].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
-            pieces.append(encoder.encode(chunk).float().cpu())
+            embeddings = encoder.encode(chunk).float().cpu()
+            if not torch.isfinite(embeddings).all():
+                raise ValueError("encoder produced non-finite embeddings")
+            pieces.append(embeddings)
 
     return torch.cat(pieces).numpy().astype(np.float32)
 
@@ -159,30 +180,14 @@ def _build_manifest(
     device,
     precision,
     weights_path,
+    model_source=None,
 ) -> Manifest:
     geometry = encoder.geometry
     plan = encoder.plan
     return Manifest(
-        settings={
-            "retention": plan.retention,
-            "prune_layer": plan.prune_layer,
-            "motion_weight": plan.motion_weight,
-            "size_biased_attention": plan.size_biased_attention,
-            "spatial_prior": plan.spatial_prior is not None,
-            "stride": stride,
-            "frame_step": frame_step,
-            "batch": batch,
-            "precision": precision,
-            "device": device,
-            "geometry": {
-                "image_size": geometry.image_size,
-                "patch_size": geometry.patch_size,
-                "frames_per_clip": geometry.frames_per_clip,
-                "tubelet_size": geometry.tubelet_size,
-                "embed_dim": geometry.embed_dim,
-                "depth": geometry.depth,
-            },
-        },
+        settings=extraction_settings(
+            encoder, stride, frame_step, batch, device, precision, model_source
+        ),
         weights=SourceFile.of(weights_path) if weights_path else None,
         cost=as_dict(clip_cost(geometry, plan.retention, plan.prune_layer)),
         outputs=per_video,
@@ -195,8 +200,50 @@ def _build_manifest(
     )
 
 
+def extraction_settings(
+    encoder: PrunedEncoder,
+    stride: int,
+    frame_step: int,
+    batch: int,
+    device: str,
+    precision: str,
+    model_source: str | Path | None = None,
+) -> dict:
+    """Describe the same extraction protocol for folder and single-video runs."""
+    geometry, plan = encoder.geometry, encoder.plan
+    return {
+        "retention": plan.retention,
+        "prune_layer": plan.prune_layer,
+        "motion_weight": plan.motion_weight,
+        "size_biased_attention": plan.size_biased_attention,
+        "spatial_prior": (
+            None if plan.spatial_prior is None else plan.spatial_prior.detach().cpu().tolist()
+        ),
+        "stride": stride,
+        "frame_step": frame_step,
+        "batch": batch,
+        "precision": precision,
+        "effective_precision": precision if str(device).startswith("cuda") else "off",
+        "device": str(device),
+        "geometry": asdict(geometry),
+        "backbone_class": (
+            f"{type(encoder.backbone).__module__}.{type(encoder.backbone).__qualname__}"
+        ),
+        "model_definition": (
+            asdict(SourceFile.of(Path(model_source) / "models" / "modeling_feature.py"))
+            if model_source is not None else None
+        ),
+    }
+
+
 def _precision(name: str):
     table = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}
     if name not in table:
         raise ValueError(f"unknown precision '{name}'. Use: {', '.join(table)}")
     return table[name]
+
+
+def _validate_encoding(batch: int, precision: str) -> None:
+    if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
+        raise ValueError("batch must be a positive integer")
+    _precision(precision)

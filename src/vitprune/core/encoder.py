@@ -11,13 +11,11 @@ between two of them without modifying the model.
 The design decision that matters most here is **which layer to prune at**. Pruning
 happens after the second block, and the reasoning has two opposing sides:
 
-* Pruning earlier does not work. A token fresh out of the patch embedding has not
-  been through any attention layer and cannot tell whether it is rare or common. It
-  needs a few blocks to acquire context.
+* Earlier tokens have less attention context, which may weaken selection quality.
 * Pruning later wastes. Cutting at block thirty means having paid full cost for
   thirty blocks to save on ten.
 
-Two blocks give enough context, and thirty-eight remain to save on. A progressive
+Two blocks are the default hypothesis, not a universally validated optimum. A progressive
 schedule, pruning a little at each block, was considered and dropped: with forty
 blocks the early ones cost little, so the advantage disappears in exchange for
 considerably more complexity.
@@ -26,14 +24,17 @@ considerably more complexity.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from math import isfinite
+from numbers import Real
 
 import torch
 from torch import nn
 
 from vitprune.core.attention import run_block
-from vitprune.core.geometry import ClipGeometry
+from vitprune.core.geometry import ClipGeometry, validate_prune_layer, validate_retention
 from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import initial_sizes, merge_tokens, size_weighted_mean
+from vitprune.core.protocols import missing_attributes
 from vitprune.core.scoring import score_tokens
 
 
@@ -57,6 +58,32 @@ class PruningPlan:
     spatial_prior: torch.Tensor | None = None
     size_biased_attention: bool = False
 
+    def __post_init__(self) -> None:
+        validate_retention(self.retention)
+        validate_prune_layer(self.prune_layer)
+        if (
+            isinstance(self.motion_weight, bool)
+            or not isinstance(self.motion_weight, Real)
+            or not isfinite(self.motion_weight)
+            or not 0.0 <= self.motion_weight <= 1.0
+        ):
+            raise ValueError("motion_weight must be finite and in [0, 1]")
+        if not isinstance(self.size_biased_attention, bool):
+            raise ValueError("size_biased_attention must be a bool")
+        if self.spatial_prior is not None:
+            prior = self.spatial_prior
+            if not isinstance(prior, torch.Tensor) or prior.ndim != 1:
+                raise ValueError("spatial_prior must be a one-dimensional tensor")
+            if not torch.isfinite(prior).all() or (prior < 0).any():
+                raise ValueError("spatial_prior must contain finite, non-negative values")
+
+    def validate_for(self, geometry: ClipGeometry) -> None:
+        """Validate the cut and prior against a concrete backbone geometry."""
+        validate_prune_layer(self.prune_layer, geometry.depth)
+        if self.spatial_prior is not None:
+            if self.spatial_prior.numel() != geometry.tokens_per_slice:
+                raise ValueError("spatial_prior positions must match geometry.tokens_per_slice")
+
     @classmethod
     def dense(cls) -> PruningPlan:
         """A plan that prunes nothing.
@@ -72,7 +99,8 @@ class PruningPlan:
 
     def with_retention(self, retention: float) -> PruningPlan:
         """A copy at a different retention ratio, for sweeping the curve."""
-        if retention >= 1.0:
+        validate_retention(retention)
+        if retention == 1.0:
             return PruningPlan.dense()
         return replace(self, retention=retention)
 
@@ -89,8 +117,9 @@ class PruningPlan:
 class PrunedEncoder(nn.Module):
     """Wraps a video backbone and prunes its tokens mid-forward.
 
-    The backbone is frozen: no parameter is trained or altered. This class decides
-    which tokens are worth carrying forward; it does not learn to decide.
+    Shares the supplied backbone: construction freezes its parameters and puts it
+    in eval mode, without changing weight values. Inference rejects training mode.
+    Do not share this object with a concurrent training job.
 
     See :mod:`vitprune.core.protocols` for the attributes the backbone must expose,
     and :func:`vitprune.core.compat.check_backbone` for verifying a given model
@@ -107,8 +136,10 @@ class PrunedEncoder(nn.Module):
         self.backbone = backbone
         self.geometry = geometry or ClipGeometry.videomae_giant()
         self.plan = plan or PruningPlan()
+        self._validate_configuration()
         for parameter in self.backbone.parameters():
             parameter.requires_grad_(False)
+        self.eval()
 
     @torch.no_grad()
     def encode(self, clips: torch.Tensor) -> torch.Tensor:
@@ -120,6 +151,8 @@ class PrunedEncoder(nn.Module):
         Returns:
             ``[batch, embed_dim]``.
         """
+        self._validate_configuration()
+        self._check_eval()
         tokens = self._tokenise(clips)
         self._check_grid(tokens.shape[1])
 
@@ -148,6 +181,8 @@ class PrunedEncoder(nn.Module):
         The decision is taken along the same path as :meth:`encode`, with the same
         score and the same criterion. It is not an approximate reconstruction.
         """
+        self._validate_configuration()
+        self._check_eval()
         if not self.plan.prunes:
             raise ValueError(
                 "a dense plan prunes nothing, so there is no selection to inspect. "
@@ -177,6 +212,45 @@ class PrunedEncoder(nn.Module):
         )
 
     # -- internals ----------------------------------------------------------
+    def _validate_configuration(self) -> None:
+        missing = missing_attributes(self.backbone)
+        if missing:
+            raise ValueError(f"backbone is missing required attributes: {', '.join(missing)}")
+        if not callable(self.backbone.patch_embed):
+            raise ValueError("backbone.patch_embed must be callable")
+        blocks = self.backbone.blocks
+        if not hasattr(blocks, "__len__") or not hasattr(blocks, "__iter__"):
+            raise ValueError("backbone.blocks must be a sized sequence of callable blocks")
+        if len(blocks) != self.geometry.depth:
+            raise ValueError(
+                f"backbone depth ({len(blocks)}) differs from geometry.depth "
+                f"({self.geometry.depth})"
+            )
+        self.plan.validate_for(self.geometry)
+        for block in blocks:
+            if not callable(block):
+                raise ValueError("each backbone block must be callable")
+        if self.plan.prunes and self.plan.size_biased_attention:
+            for block in list(blocks)[self.plan.prune_layer :]:
+                for name in ("norm1", "norm2", "mlp", "attn"):
+                    if not callable(getattr(block, name, None)):
+                        raise ValueError(f"size-biased attention requires block.{name}")
+                attention = block.attn
+                for name in ("qkv", "proj"):
+                    if not callable(getattr(attention, name, None)):
+                        raise ValueError(f"size-biased attention requires attention.{name}")
+                if (
+                    not isinstance(getattr(attention, "num_heads", None), int)
+                    or attention.num_heads <= 0
+                ):
+                    raise ValueError("size-biased attention requires attention.num_heads")
+                if self.geometry.embed_dim % attention.num_heads:
+                    raise ValueError("attention.num_heads must divide geometry.embed_dim")
+
+    def _check_eval(self) -> None:
+        if any(module.training for module in self.modules()):
+            raise ValueError("PrunedEncoder is inference-only; call encoder.eval() before encoding")
+
     def _tokenise(self, clips: torch.Tensor) -> torch.Tensor:
         """Apply the patch embedding and add the positional embedding.
 
@@ -184,9 +258,17 @@ class PrunedEncoder(nn.Module):
         one. That is why pruning tokens later invalidates no parameter: position has
         already been folded in before any cut.
         """
+        if clips.ndim != 5 or tuple(clips.shape[1:]) != self.geometry.input_shape()[1:]:
+            raise ValueError(f"clips must have shape [batch, {self.geometry.input_shape()[1:]}]")
+        if clips.shape[0] < 1 or not clips.is_floating_point():
+            raise ValueError("clips must be a non-empty floating-point batch")
         out = self.backbone.patch_embed(clips)
         if out.dim() == 5:
             out = out.flatten(2).transpose(1, 2)
+        if out.ndim != 3 or out.shape[0] != clips.shape[0]:
+            raise ValueError("patch_embed must return [B,L,D] or [B,D,S,H,W]")
+        if out.shape[-1] != self.geometry.embed_dim:
+            raise ValueError("patch_embed width differs from geometry.embed_dim")
 
         positions = getattr(self.backbone, "pos_embed", None)
         if positions is not None:
@@ -217,7 +299,7 @@ class PrunedEncoder(nn.Module):
 
     def _as_grid(self, tokens: torch.Tensor, per_slice: int) -> torch.Tensor:
         batch, _, dim = tokens.shape
-        return tokens.view(batch, self.geometry.temporal_slices, per_slice, dim)
+        return tokens.reshape(batch, self.geometry.temporal_slices, per_slice, dim)
 
     def _pool(self, tokens: torch.Tensor, sizes: torch.Tensor | None):
         norm = getattr(self.backbone, "norm", None)

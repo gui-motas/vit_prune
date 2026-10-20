@@ -91,7 +91,10 @@ def measure_drift(
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense())
     pruned = PrunedEncoder(backbone, geometry, plan)
 
-    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}[precision]
+    precisions = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}
+    if precision not in precisions:
+        raise ValueError("precision must be fp16, bf16 or off")
+    dtype = precisions[precision]
     on_gpu = str(device).startswith("cuda")
 
     cosines: list[float] = []
@@ -102,6 +105,10 @@ def measure_drift(
         with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
             a = dense.encode(one).float()
             b = pruned.encode(one).float()
+        if not torch.isfinite(a).all() or not torch.isfinite(b).all():
+            raise ValueError("cannot measure drift of non-finite embeddings")
+        if torch.norm(a) == 0 or torch.norm(b) == 0:
+            raise ValueError("cannot measure drift of zero-norm embeddings")
         cosines.append(F.cosine_similarity(a, b, dim=-1).item())
         distances.append((torch.norm(a - b) / torch.norm(a)).item())
 

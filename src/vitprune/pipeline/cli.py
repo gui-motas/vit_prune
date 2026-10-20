@@ -1,8 +1,9 @@
 """Command line for vitprune.
 
-Six commands, ordered from cheapest to most expensive:
+Commands for integration, measurement and application:
 
 * ``cost`` -- count operations. No GPU, checkpoint or video needed.
+* ``check`` -- verify the dense encoder against the original forward.
 * ``latency`` -- measure wall-clock. Needs a GPU and a checkpoint, but no video.
 * ``drift`` -- measure embedding drift. Needs video, but no labels.
 * ``run`` -- run on one video and report what came out.
@@ -24,7 +25,7 @@ import sys
 from pathlib import Path
 
 from vitprune import __version__
-from vitprune.core.geometry import ClipGeometry
+from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 
 RULE = "=" * 78
 
@@ -37,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         return args.handler(args)
-    except (FileNotFoundError, ValueError, KeyError) as problem:
+    except (OSError, ValueError, KeyError) as problem:
         print(f"error: {problem}", file=sys.stderr)
         return 2
 
@@ -50,6 +51,7 @@ def _run_cost(args) -> int:
     from vitprune.bench.hardware import accelerator, custom
 
     geometry = ClipGeometry.videomae_giant()
+    validate_prune_layer(args.prune_layer, geometry.depth)
     device = (
         custom("supplied", args.peak_tflops, args.bandwidth_gbs, args.efficiency)
         if args.peak_tflops and args.bandwidth_gbs
@@ -64,7 +66,7 @@ def _run_cost(args) -> int:
 
     rows = []
     for retention in args.retention:
-        layer = 0 if retention >= 1.0 else args.prune_layer
+        layer = 0 if retention == 1.0 else args.prune_layer
         cost = clip_cost(geometry, retention, layer)
         limit = roofline(geometry, cost, device)
         budget = corpus_budget(args.hours, cost, device, args.fps, args.stride)
@@ -136,6 +138,8 @@ def _run_drift(args) -> int:
     from vitprune.bench.drift import measure_drift
     from vitprune.pipeline.video import find_videos, read_video, to_clips
 
+    if args.clips < 1:
+        raise ValueError("clips must be positive")
     backbone = _load_backbone(args)
     geometry = ClipGeometry.videomae_giant()
     plan = _plan_from(args, geometry)
@@ -172,15 +176,24 @@ def _run_single(args) -> int:
     import time
 
     import numpy as np
+    import torch
 
-    from vitprune.bench.cost import clip_cost
+    from vitprune.bench.cost import as_dict, clip_cost
     from vitprune.bench.report import EmbeddingSummary, RunReport, TimingSummary, summarise_pruning
     from vitprune.core.encoder import PrunedEncoder, PruningPlan
-    from vitprune.pipeline.extraction import FEATURE_KEY, encode_clips
+    from vitprune.pipeline.extraction import FEATURE_KEY, encode_clips, extraction_settings
+    from vitprune.pipeline.provenance import Manifest, SourceFile
     from vitprune.pipeline.video import read_video, to_clips
 
     geometry = ClipGeometry.videomae_giant()
     plan = _plan_from(args, geometry)
+    if args.inspect_clips < 1 or not 0 <= args.top_rows <= geometry.grid_size:
+        raise ValueError("inspect-clips must be positive and top-rows within the grid")
+    destination = Path(args.out)
+    stem = Path(args.video).stem
+    for name in (f"{stem}.npz", "report.json", "manifest.json"):
+        if (destination / name).exists():
+            raise FileExistsError(f"refusing to overwrite {destination / name}")
 
     started = time.perf_counter()
     frames = read_video(args.video)
@@ -199,6 +212,7 @@ def _run_single(args) -> int:
 
     measured = None
     if args.compare and plan.prunes:
+        print("note: exploratory timing without warmup; use 'vitprune latency' for benchmarks")
         dense = PrunedEncoder(backbone, geometry, PruningPlan.dense())
         started = time.perf_counter()
         encode_clips(dense, clips, args.batch, args.device, args.precision)
@@ -210,11 +224,13 @@ def _run_single(args) -> int:
     pruning = None
     if plan.prunes:
         sample = clips[: min(args.inspect_clips, clips.shape[0])].to(args.device)
-        pruning = summarise_pruning(encoder.select(sample), geometry, args.top_rows)
+        dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}[args.precision]
+        with torch.autocast(
+            "cuda", dtype=dtype, enabled=str(args.device).startswith("cuda") and dtype is not None
+        ):
+            pruning = summarise_pruning(encoder.select(sample), geometry, args.top_rows)
 
-    destination = Path(args.out)
     destination.mkdir(parents=True, exist_ok=True)
-    stem = Path(args.video).stem
     np.savez(destination / f"{stem}.npz", **{FEATURE_KEY: embeddings})
 
     cost = clip_cost(geometry, plan.retention, plan.prune_layer)
@@ -231,11 +247,25 @@ def _run_single(args) -> int:
             measured_speedup=None if measured is None else round(measured, 3),
         ),
         pruning=pruning,
-        output_files=[f"{stem}.npz", "report.json"],
+        output_files=[f"{stem}.npz", "report.json", "manifest.json"],
     )
     (destination / "report.json").write_text(
         json.dumps(report.to_dict(), indent=2), encoding="utf-8"
     )
+    Manifest(
+        settings=extraction_settings(
+            encoder, args.stride, args.frame_step, args.batch,
+            args.device, args.precision, args.model_source,
+        ),
+        weights=SourceFile.of(args.weights),
+        cost=as_dict(cost),
+        outputs={stem: {
+            "source": as_dict(SourceFile.of(args.video)),
+            "feature_file": as_dict(SourceFile.of(destination / f"{stem}.npz")),
+            "clips": int(clips.shape[0]),
+        }},
+        statistics={"read_seconds": read_seconds, "encode_seconds": encode_seconds},
+    ).write(destination)
 
     print()
     print(report.render())
@@ -268,6 +298,7 @@ def _run_extract(args) -> int:
         device=args.device,
         precision=args.precision,
         weights_path=args.weights,
+        model_source=args.model_source,
     )
     print(f"run record: {manifest}")
     return 0
@@ -291,6 +322,7 @@ def _run_evaluate(args) -> int:
         destination=args.out,
         labels=args.labels,
         stride=args.stride,
+        frame_step=args.frame_step,
         extra_arguments=args.extra or [],
     )
 
@@ -305,6 +337,7 @@ def _run_evaluate(args) -> int:
 # shared
 # ---------------------------------------------------------------------------
 def _load_backbone(args):
+    from vitprune.core import check_backbone
     from vitprune.pipeline.checkpoint import disable_activation_checkpointing, load_videomae
 
     model = load_videomae(
@@ -314,33 +347,53 @@ def _load_backbone(args):
         device=args.device,
         learnable_positions=args.learnable_positions,
     )
-    return disable_activation_checkpointing(model)
+    model = disable_activation_checkpointing(model)
+    reference = getattr(model, "forward_features", None)
+    if not callable(reference):
+        raise ValueError(
+            "CLI backbones must expose forward_features returning clip embeddings. "
+            "For another reference, integrate through check_backbone in Python."
+        )
+    report = check_backbone(model, ClipGeometry.videomae_giant(), reference=reference)
+    print(report.describe())
+    return model
+
+
+def _run_check(args) -> int:
+    _load_backbone(args)
+    return 0
 
 
 def _plan_from(args, geometry: ClipGeometry):
     from vitprune.core.encoder import PruningPlan
     from vitprune.core.priors import top_rows_prior
 
-    prior = (
-        top_rows_prior(geometry.grid_size, args.prior_top_rows, args.prior_weight)
-        if args.prior_top_rows > 0
-        else None
-    )
-    if args.retention >= 1.0:
-        return PruningPlan.dense()
-    return PruningPlan(
+    prior = top_rows_prior(geometry.grid_size, args.prior_top_rows, args.prior_weight)
+    if args.prior_top_rows == 0:
+        prior = None
+    plan = PruningPlan(
         retention=args.retention,
         prune_layer=args.prune_layer,
         motion_weight=args.motion_weight,
         spatial_prior=prior,
         size_biased_attention=args.size_biased_attention,
     )
+    plan.validate_for(geometry)
+    return plan.with_retention(args.retention)
 
 
 def _maybe_save(args, payload) -> None:
     target = getattr(args, "save", None)
     if not target:
         return
+    from dataclasses import asdict
+
+    from vitprune.pipeline.provenance import SourceFile, describe_environment
+
+    payload["environment"] = describe_environment()
+    payload["arguments"] = {key: value for key, value in vars(args).items() if key != "handler"}
+    if getattr(args, "weights", None):
+        payload["weights"] = asdict(SourceFile.of(args.weights))
     path = Path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -404,6 +457,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"vitprune {__version__}")
     commands = parser.add_subparsers(dest="command")
+
+    check = commands.add_parser("check", help="verify dense equivalence to the original backbone")
+    _add_model_arguments(check)
+    check.set_defaults(handler=_run_check)
 
     cost = commands.add_parser("cost", help="estimate cost; needs no GPU or checkpoint")
     cost.add_argument("--retention", type=float, nargs="+", default=[1.0, 0.5, 0.35, 0.25, 0.15])
@@ -473,6 +530,7 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--downstream-weights", required=True)
     evaluate.add_argument("--entry-point", default="eval.py")
     evaluate.add_argument("--labels", help="annotation file for the evaluation split")
+    evaluate.add_argument("--frame-step", type=int, help="assert the extraction frame step")
     evaluate.add_argument(
         "--stride", type=int, help="only if no manifest exists; a mismatch aborts"
     )

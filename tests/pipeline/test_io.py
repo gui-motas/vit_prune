@@ -206,3 +206,23 @@ def test_finding_videos_accepts_a_single_file(tmp_path):
     one = tmp_path / "a.mp4"
     one.write_bytes(b"")
     assert find_videos(one) == [one]
+
+
+def test_cached_model_from_another_source_cannot_falsify_provenance(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from vitprune.pipeline.checkpoint import load_videomae
+
+    source = tmp_path / "requested"
+    (source / "models").mkdir(parents=True)
+    (source / "models" / "modeling_feature.py").write_text("", encoding="utf-8")
+    models = ModuleType("models")
+    definitions = ModuleType("models.modeling_feature")
+    definitions.__file__ = str(tmp_path / "other" / "models" / "modeling_feature.py")
+    models.modeling_feature = definitions
+    monkeypatch.setitem(sys.modules, "models", models)
+    monkeypatch.setitem(sys.modules, "models.modeling_feature", definitions)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    with pytest.raises(ValueError, match="different source"):
+        load_videomae(tmp_path / "weights.pth", source)

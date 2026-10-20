@@ -103,3 +103,23 @@ def test_inspecting_a_dense_plan_is_rejected(geometry, clips):
 
 def test_the_selection_describes_itself(encoder, clips):
     assert "temporal slices" in encoder.select(clips).describe()
+
+
+@pytest.mark.parametrize("autocast", [False, True])
+def test_inspection_uses_the_actual_encode_decision(encoder, clips, monkeypatch, autocast):
+    from vitprune.core import encoder as implementation
+
+    original = implementation.merge_tokens
+    decisions = []
+
+    def observe(tokens, sizes, scores, keep):
+        result = original(tokens, sizes, scores, keep)
+        decisions.append((scores.clone(), result.sizes.clone()))
+        return result
+
+    monkeypatch.setattr(implementation, "merge_tokens", observe)
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast):
+        encoder.encode(clips)
+        selection = encoder.select(clips)
+    assert torch.equal(decisions[0][0], selection.scores)
+    assert torch.equal(decisions[0][1].squeeze(-1), selection.sizes)

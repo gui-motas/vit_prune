@@ -72,7 +72,9 @@ def test_the_version_is_reported(capsys):
     assert "vitprune" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("command", ["cost", "latency", "drift", "run", "extract", "evaluate"])
+@pytest.mark.parametrize(
+    "command", ["check", "cost", "latency", "drift", "run", "extract", "evaluate"]
+)
 def test_every_command_has_help(command, capsys):
     with pytest.raises(SystemExit):
         main([command, "--help"])
@@ -95,3 +97,26 @@ def test_evaluate_requires_the_downstream_model(capsys):
     with pytest.raises(SystemExit):
         main(["evaluate", "--features", "x", "--out", "y"])
     assert "--downstream-project" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arguments", [["--retention", "1.5"], ["--prune-layer", "41"]])
+def test_cost_rejects_invalid_plans(arguments):
+    assert main(["cost", *arguments]) == 2
+
+
+def test_check_command_uses_the_original_reference(monkeypatch, capsys):
+    import torch
+
+    from vitprune.core import ClipGeometry
+    from vitprune.core.testing import reference_backbone, reference_geometry
+    from vitprune.pipeline import checkpoint
+
+    geometry = reference_geometry()
+    backbone = reference_backbone(geometry)
+    monkeypatch.setattr(ClipGeometry, "videomae_giant", lambda: geometry)
+    monkeypatch.setattr(checkpoint, "load_videomae", lambda *args, **kwargs: backbone)
+    assert main(["check", "--weights", "w", "--model-source", "s", "--device", "cpu"]) == 0
+    assert "matches reference" in capsys.readouterr().out
+
+    backbone.forward_features = lambda clips: torch.zeros(1, geometry.embed_dim)
+    assert main(["check", "--weights", "w", "--model-source", "s", "--device", "cpu"]) == 2

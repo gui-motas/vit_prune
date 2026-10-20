@@ -15,7 +15,11 @@ encoder = PrunedEncoder(backbone, geometry, PruningPlan(retention=0.25))
 features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 ```
 
-The backbone is not modified and not trained.
+Weight values are not changed. `PrunedEncoder` shares the supplied backbone,
+freezes `requires_grad` and calls `eval()` recursively. Do not share it with a
+concurrent training job. Calls to `encode` and `select` reject training mode.
+The compatibility probe temporarily uses eval mode and restores training flags,
+gradient flags and the probe device's RNG state, including on failure.
 
 ## How control flows
 
@@ -48,7 +52,7 @@ backbone. It is also why the contract lists parts rather than an entry point.
 
 | Attribute | Required | Notes |
 |---|---|---|
-| `patch_embed(x)` | yes | accepts `[B,D,T,H,W]` or `[B,L,D]` output |
+| `patch_embed(x)` | yes | receives `[B,3,T,H,W]`; returns `[B,D,S,H,W]` or `[B,L,D]` |
 | `blocks` | yes | sequence of modules callable as `block(x) -> x` |
 | `pos_embed` | no | added when present |
 | `pos_drop` | no | applied when present |
@@ -73,10 +77,9 @@ ClipGeometry.videomae_large()  # 224/16, tubelet 2, 1024 dims, 24 blocks
 ClipGeometry.image_vit(224, 16, 768, 12, 12)  # one temporal slice
 ```
 
-For an image transformer, `image_vit` models the input as a clip with a single
-temporal slice. Pruning works, but there is no previous slice to compare against, so
-the motion term is always zero. Set `motion_weight=0.0` so the score reflects that
-rather than relying on a constant.
+`image_vit` only describes a single-slice grid. The input remains 5D; a conventional
+4D image ViT needs an adapter. There is no built-in insertion or pooling of class
+tokens. For a compatible single-slice adapter, set `motion_weight=0.0`.
 
 ### 2. Does the dense path reproduce your forward pass?
 
@@ -90,7 +93,9 @@ pass. **Do not skip it.** If they differ, something is wired wrong, and any numb
 measured afterwards would be ambiguous between a real effect and a bug.
 
 `check_backbone` raises by default. Pass `raise_on_failure=False` to inspect the
-report instead.
+report instead. Without a reference, only structure and grid are inspected and
+`report.ok` remains false. The probe infers device and dtype from the backbone.
+Reference output must be a finite `[B,D]` tensor (or the first element of a tuple).
 
 ### 3. How far does the embedding move?
 
@@ -115,11 +120,9 @@ If your model summarises through a class token instead, the guarantee does not h
 A class token is not a mean: it is a token that reads the others through attention.
 Pruning changes what it sees, and no bookkeeping recovers that.
 
-Pruning still runs in that case, and may still work, but the property that justifies
-the method is gone. Step 2 catches it: the dense path will not match your reference.
-
-If you are in that situation, `size_biased_attention=True` stops being an optional
-experiment and becomes the only compensating mechanism available.
+Class-token models are outside the supported interface. Step 2 rejects a mismatched
+reference. Proportional attention is not a class-token adapter: it only augments
+attention in the supported VideoMAE block layout. See [contracts.md](contracts.md).
 
 ## Testing your integration
 
@@ -157,3 +160,6 @@ pip install "vitprune[pipeline]"   # plus video decoding and the evaluation driv
 
 If you already have your own data loading, the base install is enough.
 `vitprune.core` imports nothing outside numpy and torch, and a test enforces that.
+
+For local development: `pip install -e ".[pipeline,dev]"`. The CLI is an optional
+application of this interface, not a prerequisite to using the encoder.

@@ -154,6 +154,13 @@ def _import_builder(source_dir: str | Path, builder_name: str):
 
     import models.modeling_feature as definitions
 
+    actual_source = getattr(definitions, "__file__", None)
+    expected_source = source / "models" / "modeling_feature.py"
+    if actual_source is None or Path(actual_source).resolve() != expected_source:
+        raise ValueError(
+            "models.modeling_feature was imported from a different source. "
+            "Use a fresh Python process with the intended --model-source."
+        )
     if not hasattr(definitions, builder_name):
         raise AttributeError(f"{builder_name} not found in models/modeling_feature.py")
     return getattr(definitions, builder_name)

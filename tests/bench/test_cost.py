@@ -1,5 +1,5 @@
-"""The cost model must run without torch, without a GPU and without weights, so that
-an estimate is available before machine time is booked. These tests import no torch.
+"""Cost formulas need no GPU or weights. The package still requires torch through
+its base imports; these tests do not directly execute torch operations.
 """
 
 import pytest
@@ -123,3 +123,10 @@ def test_invalid_card_parameters_are_rejected(peak, bandwidth, efficiency):
 def test_every_catalogued_card_describes_itself():
     for name in CATALOG:
         assert "TFLOP/s" in accelerator(name).describe()
+
+
+@pytest.mark.parametrize("retention,layer", [(1.5, 0), (float("nan"), 0), (0.25, 41),
+                                           (1.0, -1), (1.0, 41)])
+def test_invalid_plans_are_not_reported_as_dense_costs(geometry, retention, layer):
+    with pytest.raises(ValueError):
+        clip_cost(geometry, retention, layer)

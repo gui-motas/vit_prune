@@ -10,12 +10,15 @@ those tokens are redundant: in a fixed camera, large parts of the frame never ch
 neighbour, so the clip embedding stays faithful to the whole scene while the
 remaining blocks run on far fewer tokens.
 
-The backbone is never modified and never trained. You swap one call:
+Weight values are never trained or rewritten. The wrapper shares your backbone,
+freezes its parameters and sets it to eval mode. After checking compatibility:
 
 ```python
-from vitprune.core import ClipGeometry, PrunedEncoder, PruningPlan
+from vitprune import ClipGeometry, PrunedEncoder, PruningPlan, check_backbone
 
-encoder = PrunedEncoder(backbone, ClipGeometry.videomae_giant(), PruningPlan(retention=0.25))
+geometry = ClipGeometry.videomae_giant()
+check_backbone(backbone, geometry, reference=backbone.forward_features)
+encoder = PrunedEncoder(backbone, geometry, PruningPlan(retention=0.25))
 features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 ```
 
@@ -25,6 +28,9 @@ features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 pip install vitprune               # the method
 pip install "vitprune[pipeline]"   # plus video reading and the evaluation driver
 ```
+
+For this local checkout, use `pip install -e ".[pipeline,dev]"`. The commands above
+describe package extras, not confirmation that this checkout is published on PyPI.
 
 The core depends only on `numpy` and `torch`. Reading video files and driving an
 external temporal model are separate concerns, behind the `pipeline` extra.
@@ -63,7 +69,7 @@ effect and a bug.
 
 | Attribute | Required | Notes |
 |---|---|---|
-| `patch_embed(x)` | yes | accepts `[B,D,T,H,W]` or `[B,L,D]` output |
+| `patch_embed(x)` | yes | receives 5D clips; returns `[B,D,S,H,W]` or `[B,L,D]` |
 | `blocks` | yes | a sequence of modules callable as `block(x) -> x` |
 | `pos_embed` | no | added when present |
 | `pos_drop` | no | applied when present |
@@ -78,16 +84,19 @@ The merge guarantees that size-weighted pooling over the kept tokens equals mean
 pooling over all original tokens. That guarantee assumes your backbone pools by
 averaging tokens. VideoMAE does.
 
-If your model reads a class token instead, the guarantee does not apply. Pruning
-still runs, but the property that justifies the method is gone. `check_backbone`
-catches this, because the dense path will no longer match your reference.
+Class-token backbones and conventional 4D image ViTs need a separate adapter and
+are not supported automatically. `image_vit()` only describes a single-slice grid.
+`size_biased_attention` does not implement class-token support.
+
+Without a reference forward, `check_backbone(..., raise_on_failure=False)` returns
+an incomplete report with `ok=False`; it cannot approve behavioural compatibility.
 
 ## Package layout
 
 | Package | Contents | Depends on |
 |---|---|---|
 | `vitprune.core` | the method: geometry, scoring, merging, attention, encoder | numpy, torch |
-| `vitprune.bench` | measurement: cost model, drift, latency, reports | numpy |
+| `vitprune.bench` | measurement: cost model, drift, latency, reports | core, numpy, torch |
 | `vitprune.pipeline` | application glue: video I/O, checkpoints, extraction, evaluation, CLI | opencv, PyYAML |
 
 `core` never imports from `bench` or `pipeline`. A test enforces this, so the library
@@ -95,19 +104,22 @@ stays installable on its own.
 
 ## Command line
 
-The `pipeline` extra installs a `vitprune` command.
+The base installation registers `vitprune`; video reading and evaluation require
+the `pipeline` extra. The CLI uses the Giant geometry; Python callers choose theirs.
 
 ```bash
 vitprune cost     --retention 1.0 0.5 0.25        # analytic estimate, no GPU needed
+vitprune check    --weights w.pth --model-source /path --device cpu
 vitprune latency  --weights w.pth --model-source /path --retention 1.0 0.25
 vitprune drift    --videos data/ --weights w.pth --model-source /path
 vitprune run      --video clip.mp4 --weights w.pth --model-source /path
 vitprune extract  --videos data/ --weights w.pth --model-source /path --out feats/
-vitprune evaluate --features feats/ --localizer-project /path ...
+vitprune evaluate --features feats/ --downstream-project /path --downstream-config config.yaml --downstream-weights best.pth --out runs/eval
 ```
 
-Ordered from cheapest to most expensive. `cost` needs nothing; `latency` needs no
-video; `drift` needs no labels.
+`cost` needs the base dependencies, but no GPU, weights or video. Model commands
+automatically check dense equivalence before running. `drift --retention 1.0` is a
+repeatability check, not a replacement for comparison to the original forward.
 
 ## Documentation
 
@@ -117,6 +129,10 @@ video; `drift` needs no labels.
 | [`docs/integration.md`](docs/integration.md) | adding it to an existing project |
 | [`docs/architecture.md`](docs/architecture.md) | what each module owns |
 | [`docs/experiments.md`](docs/experiments.md) | measuring, and reading the results |
+| [`docs/contracts.md`](docs/contracts.md) | supported shapes, state and validation |
+| [`docs/operations.md`](docs/operations.md) | current CLI, outputs and provenance |
+| [`docs/history.md`](docs/history.md) | historical scripts and reported results |
+| [`docs/validation.md`](docs/validation.md) | local test results and remaining validation limits |
 
 ## Tests
 

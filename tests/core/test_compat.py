@@ -83,7 +83,8 @@ def test_a_reference_that_disagrees_is_reported(backbone, geometry):
 
 
 def test_without_a_reference_the_behaviour_check_is_skipped(backbone, geometry):
-    report = check_backbone(backbone, geometry)
+    report = check_backbone(backbone, geometry, raise_on_failure=False)
+    assert not report.ok
     assert report.dense_matches_reference is None
     assert "not checked" in report.describe()
 
@@ -117,3 +118,45 @@ def test_a_reference_returning_a_tuple_is_accepted(backbone, geometry):
         return backbone.forward_features(clips), torch.zeros(1)
 
     assert check_backbone(backbone, geometry, reference=tuple_reference).ok
+
+
+def test_a_reference_is_required_for_full_approval(backbone, geometry):
+    with pytest.raises(ValueError, match="not checked"):
+        check_backbone(backbone, geometry)
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_check_restores_training_gradient_and_rng_state(backbone, geometry, failure):
+    backbone.train()
+    backbone.blocks[0].eval()
+    next(backbone.parameters()).requires_grad_(False)
+    modes = [module.training for module in backbone.modules()]
+    gradients = [parameter.requires_grad for parameter in backbone.parameters()]
+    rng = torch.random.get_rng_state().clone()
+
+    def reference(clips):
+        assert not any(module.training for module in backbone.modules())
+        return backbone.forward_features(clips) + (1 if failure else 0)
+
+    report = check_backbone(backbone, geometry, reference=reference, raise_on_failure=False)
+    assert report.ok is not failure
+    assert modes == [module.training for module in backbone.modules()]
+    assert gradients == [parameter.requires_grad for parameter in backbone.parameters()]
+    assert torch.equal(rng, torch.random.get_rng_state())
+
+
+def test_reference_shapes_cannot_pass_via_broadcasting(backbone, geometry):
+    report = check_backbone(
+        backbone, geometry, reference=lambda clips: torch.zeros(geometry.embed_dim),
+        raise_on_failure=False,
+    )
+    assert not report.ok
+    assert "shaped" in report.describe()
+
+
+def test_non_finite_reference_is_not_compatible(backbone, geometry):
+    with pytest.raises(ValueError, match="DIFFERS"):
+        check_backbone(
+            backbone, geometry,
+            reference=lambda clips: backbone.forward_features(clips) * float("nan"),
+        )

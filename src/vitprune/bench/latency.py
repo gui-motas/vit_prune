@@ -33,7 +33,7 @@ import torch
 
 from vitprune.bench.cost import clip_cost
 from vitprune.core.encoder import PrunedEncoder, PruningPlan
-from vitprune.core.geometry import ClipGeometry
+from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 
 DEFAULT_WARMUP = 5
 DEFAULT_ITERATIONS = 20
@@ -91,8 +91,7 @@ def measure_latency(
 
     Args:
         backbone: the frozen video backbone.
-        retentions: ratios to measure. The first is the reference for the speedups,
-            so it is usually 1.0.
+        retentions: ratios to measure. Must start with the dense baseline, 1.0.
         geometry: the clip geometry.
         prune_layer: which block to prune after.
         batch: clips per forward pass.
@@ -108,16 +107,23 @@ def measure_latency(
     """
     if not retentions:
         raise ValueError("provide at least one retention ratio")
+    if retentions[0] != 1.0:
+        raise ValueError("retentions must start with the dense baseline (1.0)")
+    if batch < 1 or iterations < 1 or warmup < 0:
+        raise ValueError("batch and iterations must be positive; warmup must be non-negative")
 
     geometry = geometry or ClipGeometry.videomae_giant()
+    validate_prune_layer(prune_layer, geometry.depth)
+    plans = [_plan_for(retention, prune_layer, size_biased_attention) for retention in retentions]
+    for plan in plans:
+        plan.validate_for(geometry)
     sample = torch.randn(*geometry.input_shape(batch), device=device)
     dtype = _precision(precision)
 
     points: list[LatencyPoint] = []
     baseline_ms: float | None = None
 
-    for retention in retentions:
-        plan = _plan_for(retention, prune_layer, size_biased_attention)
+    for retention, plan in zip(retentions, plans, strict=True):
         encoder = PrunedEncoder(backbone, geometry, plan)
 
         ms, peak = _time_one(encoder, sample, warmup, iterations, device, dtype, batch)
@@ -165,9 +171,8 @@ def _time_one(encoder, sample, warmup, iterations, device, dtype, batch):
 
 
 def _plan_for(retention: float, prune_layer: int, biased: bool) -> PruningPlan:
-    if retention >= 1.0:
-        return PruningPlan.dense()
-    return PruningPlan(retention=retention, prune_layer=prune_layer, size_biased_attention=biased)
+    plan = PruningPlan(retention=retention, prune_layer=prune_layer, size_biased_attention=biased)
+    return plan.with_retention(retention)
 
 
 def _precision(name: str):

@@ -126,6 +126,17 @@ def test_an_empty_list_of_ratios_is_rejected(backbone, geometry):
         measure_latency(backbone, [], geometry, device="cpu")
 
 
+def test_latency_cannot_report_a_pruned_point_as_the_dense_baseline(backbone, geometry):
+    with pytest.raises(ValueError, match="dense baseline"):
+        _measure(backbone, geometry, [0.5, 0.25])
+
+
+@pytest.mark.parametrize("kwargs", [{"batch": 0}, {"iterations": 0}, {"warmup": -1}])
+def test_invalid_timing_configuration_fails_before_running(backbone, geometry, kwargs):
+    with pytest.raises(ValueError):
+        measure_latency(backbone, [1.0], geometry, device="cpu", **kwargs)
+
+
 def test_an_unknown_precision_is_rejected(backbone, geometry):
     with pytest.raises(ValueError, match="precision"):
         measure_latency(
@@ -144,9 +155,13 @@ def test_an_unknown_precision_is_rejected(backbone, geometry):
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
-def test_identical_norms_raise_a_warning():
-    """All norms equal means the backbone is not responding to content."""
+def test_repeated_embeddings_raise_a_warning():
+    """Repeated vectors warrant inspection; norms alone do not prove a defect."""
     assert "WARNING" in "\n".join(EmbeddingSummary.of(np.tile(np.ones(8), (5, 1))).describe())
+
+
+def test_distinct_embeddings_with_equal_norms_do_not_raise_a_warning():
+    assert "WARNING" not in "\n".join(EmbeddingSummary.of(np.eye(8)).describe())
 
 
 def test_non_finite_values_raise_a_warning():

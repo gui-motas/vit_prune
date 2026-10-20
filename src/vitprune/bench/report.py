@@ -31,8 +31,8 @@ class EmbeddingSummary:
     """How the embeddings behave along the video.
 
     This does not judge quality -- that needs a downstream model. It detects
-    degenerate output: identical norms mean the backbone is not responding to
-    content; non-finite values mean something is broken.
+    degenerate output: repeated embeddings warrant inspection; identical norms alone
+    do not, since LayerNorm can produce those for healthy, different embeddings.
     """
 
     clips: int
@@ -42,6 +42,7 @@ class EmbeddingSummary:
     norm_max: float
     consecutive_similarity_mean: float
     all_finite: bool
+    identical_embeddings: bool = False
 
     @classmethod
     def of(cls, embeddings: np.ndarray) -> EmbeddingSummary:
@@ -54,6 +55,9 @@ class EmbeddingSummary:
             norm_max=round(float(norms.max()), 4),
             consecutive_similarity_mean=round(_consecutive_similarity(embeddings), 4),
             all_finite=bool(np.isfinite(embeddings).all()),
+            identical_embeddings=bool(
+                embeddings.shape[0] > 1 and np.allclose(embeddings, embeddings[:1])
+            ),
         )
 
     def describe(self) -> list[str]:
@@ -65,8 +69,8 @@ class EmbeddingSummary:
         ]
         if not self.all_finite:
             lines.append("  WARNING: the embeddings contain non-finite values")
-        if self.norm_max - self.norm_min < 1e-6:
-            lines.append("  WARNING: all norms identical, the backbone may not be responding")
+        if self.identical_embeddings:
+            lines.append("  WARNING: all embeddings identical; inspect input and backbone")
         return lines
 
 

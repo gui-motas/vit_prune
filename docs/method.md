@@ -49,8 +49,8 @@ holding an object resembles nothing nearby and scores high.
 
 The comparison runs at two levels: against the mean of the **whole clip**, which
 catches what is rare overall, and against the mean of the token's **own temporal
-slice**, which catches what is rare at that instant. A token scores high only when it
-stands out at both.
+slice**, which catches what is rare at that instant. The two contributions are added;
+this favours deviation at both levels without requiring both to be large.
 
 ### Motion
 
@@ -111,14 +111,14 @@ without merging, so the two paths separate. That separation is **drift**, and
 
 Pruning happens after the second of forty blocks. Two opposing pressures set that.
 
-**Pruning earlier does not work.** A token fresh out of the patch embedding has not
-been through any attention layer. It cannot tell whether it is rare or common,
-because it has not seen anything else. It needs a few blocks to acquire context.
+**Earlier tokens have less context.** This may weaken selection quality; the size
+of that effect is an empirical question, not a proven impossibility of earlier cuts.
 
 **Pruning later wastes.** Cutting at block thirty means having paid full cost for
 thirty blocks in order to save on ten.
 
-Two blocks are enough for context, and thirty-eight remain to save on.
+Two blocks are the default hypothesis, leaving thirty-eight blocks to save on.
+Compare cuts empirically rather than treating this as a universal optimum.
 
 A progressive schedule -- pruning a little at each block -- was considered and
 dropped. With forty blocks, the early ones are a small share of the total, so the
@@ -171,7 +171,7 @@ hypothesis to test.
 4. The highest scoring survive; the rest are merged into their nearest match, carrying
    their size forward
 5. The remaining blocks run on four times fewer tokens
-6. Size-weighted pooling keeps the clip embedding intact
+6. Size-weighted pooling honours merged token masses; final embeddings can drift
 
 Analytically that predicts roughly a 3.9x speedup at 25% retention. Analytic
 predictions and clocks are different things, and the distance between them is what

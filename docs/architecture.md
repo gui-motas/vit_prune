@@ -8,7 +8,7 @@ pipeline   video decoding, checkpoints, extraction, evaluation, CLI
    |       needs: opencv, PyYAML
    v
 bench      cost model, drift, latency, reports
-   |       needs: numpy
+   |       needs: core, numpy, torch
    v
 core       the method
            needs: numpy, torch
@@ -69,8 +69,9 @@ Measurement. Separate because measuring is not part of the method.
 
 ### Decisions worth recording
 
-**`cost` and `hardware` do not import torch.** An estimate has to be available before
-any machine is booked. A test enforces this.
+**`cost` and `hardware` do not directly import torch or execute tensor operations.**
+The public package imports core transitively, so the base dependencies, including
+torch, must still be installed. No GPU or checkpoint is required.
 
 **Accelerator figures are data.** Datasheet numbers hard-coded into a source file
 make every estimate wrong the moment the experiment moves machines -- which it will.
@@ -114,6 +115,22 @@ a study whose conclusion comes out inverted.
 
 **`cli` decides nothing.** It translates arguments and prints. When a command starts
 making a decision, the decision belongs elsewhere.
+
+The CLI verifies `forward_features` equivalence through `check_backbone` after
+loading and disabling activation checkpointing. It currently fixes Giant geometry.
+Python integrations can supply another geometry and their own reference callable.
+
+## Current contracts and compatibility changes
+
+Plans reject invalid ratios and nonexistent cuts instead of silently becoming
+dense. Encoder construction checks actual depth, freezes the shared backbone and
+sets eval mode. The probe does not permanently change that state. The full
+interface is in [contracts.md](contracts.md).
+
+Extraction refuses duplicate video stems and pre-existing target features. Manifest
+schema 2 records prior values, complete geometry and SHA-256 fingerprints.
+Evaluation writes a separate record, retaining the prepared configuration and exit
+status. Old manifests can still be read, but absent metadata is not reconstructed.
 
 ## Test layout
 

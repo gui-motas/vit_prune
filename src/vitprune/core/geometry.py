@@ -13,6 +13,8 @@ later, with nothing pointing back at the cause.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
+from numbers import Integral, Real
 
 # VideoMAE v2 Giant (ViT-g/14).
 GIANT_IMAGE_SIZE = 224
@@ -30,6 +32,25 @@ LARGE_EMBED_DIM = 1024
 LARGE_DEPTH = 24
 LARGE_HEADS = 16
 LARGE_MLP_RATIO = 4.0
+
+
+def validate_retention(retention: float) -> None:
+    """Reject invalid ratios even when a caller would otherwise skip pruning."""
+    if (
+        isinstance(retention, bool)
+        or not isinstance(retention, Real)
+        or not isfinite(retention)
+        or not 0.0 < retention <= 1.0
+    ):
+        raise ValueError(f"retention must be finite and in (0, 1], got {retention}")
+
+
+def validate_prune_layer(layer: int, depth: int | None = None) -> None:
+    """Zero disables pruning; positive cuts must name an existing block."""
+    if isinstance(layer, bool) or not isinstance(layer, Integral) or layer < 0:
+        raise ValueError(f"prune_layer must be a non-negative integer, got {layer}")
+    if depth is not None and layer > depth:
+        raise ValueError(f"prune_layer ({layer}) exceeds backbone depth ({depth})")
 
 
 @dataclass(frozen=True)
@@ -61,6 +82,17 @@ class ClipGeometry:
     mlp_ratio: float = GIANT_MLP_RATIO
 
     def __post_init__(self) -> None:
+        for name in (
+            "image_size", "patch_size", "tubelet_size", "frames_per_clip",
+            "embed_dim", "depth", "heads",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value}")
+        if not isinstance(self.mlp_ratio, Real) or not isfinite(self.mlp_ratio):
+            raise ValueError("mlp_ratio must be finite and positive")
+        if self.mlp_ratio <= 0 or isinstance(self.mlp_ratio, bool):
+            raise ValueError("mlp_ratio must be finite and positive")
         if self.image_size % self.patch_size:
             raise ValueError(
                 f"image_size ({self.image_size}) must be divisible by "
@@ -173,8 +205,7 @@ class ClipGeometry:
         >>> ClipGeometry.videomae_giant().kept_per_slice(0.25)
         64
         """
-        if not 0.0 < retention <= 1.0:
-            raise ValueError(f"retention must be in (0, 1], got {retention}")
+        validate_retention(retention)
         return max(1, round(self.tokens_per_slice * retention))
 
     def kept_tokens(self, retention: float) -> int:
