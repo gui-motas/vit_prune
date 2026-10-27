@@ -34,7 +34,7 @@ import torch
 
 from vitprune.bench.cost import budget_cost
 from vitprune.core.encoder import PrunedEncoder, PruningPlan
-from vitprune.core.geometry import ClipGeometry, validate_prune_layer
+from vitprune.core.geometry import ClipGeometry
 
 DEFAULT_WARMUP = 5
 DEFAULT_ITERATIONS = 20
@@ -155,54 +155,10 @@ def measure_plans(
     return points
 
 
-def measure_latency(
-    backbone: torch.nn.Module,
-    retentions: list[float],
-    geometry: ClipGeometry | None = None,
-    prune_layer: int = 2,
-    batch: int = 8,
-    warmup: int = DEFAULT_WARMUP,
-    iterations: int = DEFAULT_ITERATIONS,
-    device: str = "cuda",
-    precision: str = "fp16",
-    size_biased_attention: bool = False,
-    progress=print,
-) -> list[LatencyPoint]:
-    """Time the backbone at fixed retention ratios, on random input.
-
-    Args:
-        retentions: ratios to measure. Must start with the dense baseline, 1.0.
-        batch: clips per forward pass.
-
-    The other arguments are those of :func:`measure_plans`.
-    """
-    if not retentions:
-        raise ValueError("provide at least one retention ratio")
-    if retentions[0] != 1.0:
-        raise ValueError("retentions must start with the dense baseline (1.0)")
-    if batch < 1 or iterations < 1 or warmup < 0:
-        raise ValueError("batch and iterations must be positive; warmup must be non-negative")
-
-    geometry = geometry or ClipGeometry.videomae_giant()
-    validate_prune_layer(prune_layer, geometry.depth)
-    _precision(precision)
-    base = PruningPlan(prune_layer=prune_layer, size_biased_attention=size_biased_attention)
-    plans = [base.with_retention(retention) for retention in retentions]
-    for plan in plans:
-        plan.validate_for(geometry)
-    sample = torch.randn(*geometry.input_shape(batch), device=device)
-    return measure_plans(
-        backbone, sample, plans, geometry, warmup, iterations, device, precision, progress
-    )
-
-
 def _tokens_kept(encoder: PrunedEncoder, sample, device, dtype) -> list[int]:
     """Tokens each clip keeps after the cut. Runs once, outside the timed loop."""
-    plan, geometry = encoder.plan, encoder.geometry
-    if not plan.prunes:
-        return [geometry.num_tokens] * sample.shape[0]
-    if plan.budget is None:
-        return [geometry.kept_tokens(plan.retention)] * sample.shape[0]
+    if not encoder.plan.prunes:
+        return [encoder.geometry.num_tokens] * sample.shape[0]
     with torch.no_grad(), _autocast(device, dtype):
         _, budget = encoder.encode_with_budget(sample)
     return budget.tokens.tolist()

@@ -7,7 +7,7 @@ available. The old `torch` extra no longer exists.
 ## Commands
 
 ```bash
-vitprune cost --retention 1.0 0.5 0.25 --save results/cost.json
+vitprune cost --policy policy.json --save results/cost.json
 vitprune check --weights w.pth --model-source /path/to/videomae
 vitprune calibrate --videos calibration/ --weights w.pth --model-source /path/to/videomae --levels 256 512 768 --out policy.json
 vitprune latency --weights w.pth --model-source /path/to/videomae --policy policy.json --videos data/ --precision bf16 --save results/latency.json
@@ -23,9 +23,11 @@ videos must not be part of the evaluation. A policy file is never overwritten, a
 policy is refused when used with a different `--prune-layer` or `--frame-step` than it
 was calibrated with. Use the same stride and precision as the extraction.
 
-`--policy` replaces `--retention` in `latency`, `drift`, `run` and `extract`. With a
-policy, `latency` times the dense path and the policy on real clips from `--videos`,
-since the budget depends on the content.
+`--policy` selects the adaptive budget in `cost`, `latency`, `drift`, `run` and
+`extract`. Without it, `run` and `extract` produce the dense baseline; `latency` and
+`drift` require it. `cost` without a policy takes the levels from `--tokens` (default
+256 512 768). `latency` times the dense path and the policy on real clips from
+`--videos`, since the budget depends on the content.
 
 `check`, `latency`, `drift`, `run` and `extract` support `--device cpu` and require
 an external Giant backbone exposing `forward_features`. All verify dense equivalence

@@ -11,11 +11,11 @@ This module turns that matrix into a report answering three questions:
 * **What did it cost?** Time per clip, separating video decoding from the backbone,
   and how much of that matches the analytic prediction.
 * **What was pruned?** How many tokens remained, what size each carries, and which
-  region of the frame the retention budget went to.
+  region of the frame the token budget went to.
 
 The third question is why this module exists. Without it, a run with pruning and a
 run without produce indistinguishable reports, and there is no way to notice that a
-retention setting was ignored because of a misconfiguration.
+budget was ignored because of a misconfiguration.
 """
 
 from __future__ import annotations

@@ -88,7 +88,7 @@ and merging; `drift` says it is not accuracy; `latency` says low realisation is 
 finding. A number without that caveat beside it becomes a wrong conclusion.
 
 **`report` exists so pruning is verifiable.** Without it, a run with pruning and one
-without produce indistinguishable output, and a retention setting ignored through
+without produce indistinguishable output, and a budget ignored through
 misconfiguration would pass unnoticed.
 
 ## pipeline
@@ -130,10 +130,10 @@ Python integrations can supply another geometry and their own reference callable
 
 ## Current contracts and compatibility changes
 
-Plans reject invalid ratios and nonexistent cuts instead of silently becoming
-dense. Encoder construction checks actual depth, freezes the shared backbone and
-sets eval mode. The probe does not permanently change that state. The full
-interface is in [contracts.md](contracts.md).
+Plans reject invalid budgets and nonexistent cuts instead of silently becoming
+dense; a plan without a budget is the dense path. Encoder construction checks actual
+depth, freezes the shared backbone and sets eval mode. The probe does not permanently
+change that state. The full interface is in [contracts.md](contracts.md).
 
 Extraction refuses duplicate video stems and pre-existing target features. Manifest
 schema 2 records prior values, complete geometry and SHA-256 fingerprints.

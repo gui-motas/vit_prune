@@ -3,7 +3,7 @@
 Both criteria in :mod:`vitprune.core.scoring` are blind to meaning. In a
 vehicle-mounted camera that has a concrete side effect: the windscreen scores very
 high, being at once the region of greatest motion and of greatest uniqueness. The
-method spends retention budget looking out of the window, which is exactly where the
+method spends its token budget looking out of the window, which is exactly where the
 information it is after is not.
 
 A per-position multiplier fixes that by lowering the score of known bands of the

@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass
 from numbers import Integral
 
 from vitprune.bench.hardware import Accelerator
-from vitprune.core.geometry import ClipGeometry, validate_prune_layer, validate_retention
+from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 
 #: One multiply-accumulate is two floating point operations.
 FLOPS_PER_MAC = 2
@@ -100,32 +100,18 @@ class CorpusBudget:
         )
 
 
-def clip_cost(geometry: ClipGeometry, retention: float, prune_layer: int) -> ClipCost:
-    """Count the operations in one clip, with and without pruning.
+def budget_cost(geometry: ClipGeometry, tokens: Sequence[int], prune_layer: int) -> ClipCost:
+    """Expected cost per clip when each clip keeps its own number of tokens.
 
     The per-block count sums three parts: producing query, key and value; comparing
     every token against every other; and the feed-forward layer. Only the second
     grows with the square of the token count. Linear projections and the MLP can
     dominate the total for wide backbones; fewer attention pairs are not total speedup.
-    """
-    validate_retention(retention)
-    validate_prune_layer(prune_layer, geometry.depth)
-    prunes = prune_layer > 0 and retention < 1.0
-    kept = geometry.kept_tokens(retention) if prunes else geometry.num_tokens
-    return ClipCost(
-        tokens_dense=geometry.num_tokens,
-        tokens_pruned=kept,
-        gmacs_dense=_accumulate(geometry, geometry.num_tokens, 0),
-        gmacs_pruned=_accumulate(geometry, kept, prune_layer),
-    )
 
-
-def budget_cost(geometry: ClipGeometry, tokens: Sequence[int], prune_layer: int) -> ClipCost:
-    """Expected cost per clip when each clip keeps its own number of tokens.
-
-    The attention term grows with the square of the token count, so the cost of the
-    mean is not the mean of the costs: two clips keeping 256 and 768 tokens cost more
-    than two keeping 512. Pass the counts the clips actually kept, not their average.
+    Because of that square, the cost of the mean is not the mean of the costs: two
+    clips keeping 256 and 768 tokens cost more than two keeping 512. Pass the counts
+    the clips actually kept, not their average. With ``prune_layer`` 0 the counts are
+    ignored and the result is the dense path.
 
     Args:
         geometry: the clip geometry.
@@ -185,7 +171,7 @@ def corpus_budget(
 
     Args:
         hours_of_video: total duration of the corpus.
-        cost: the output of :func:`clip_cost`.
+        cost: the output of :func:`budget_cost`.
         device: the accelerator considered.
         fps: frames per second of the source video.
         stride: frames between the start of consecutive clips.

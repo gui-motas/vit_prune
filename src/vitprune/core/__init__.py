@@ -6,12 +6,17 @@ lives in :mod:`vitprune.bench`.
 
 Typical use::
 
-    from vitprune.core import ClipGeometry, PrunedEncoder, PruningPlan, check_backbone
+    from vitprune.core import (
+        ClipGeometry, PrunedEncoder, PruningPlan, calibrate_policy, check_backbone
+    )
 
     geometry = ClipGeometry.videomae_giant()
     check_backbone(backbone, geometry, reference=backbone.forward_features)
 
-    encoder = PrunedEncoder(backbone, geometry, PruningPlan(retention=0.25))
+    probe = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=2))
+    policy = calibrate_policy(probe.statistics(calibration_clips), [256, 512, 768])
+
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=2, budget=policy))
     features = encoder.encode(clips)
 """
 

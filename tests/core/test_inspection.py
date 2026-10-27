@@ -17,8 +17,8 @@ def geometry():
 
 
 @pytest.fixture
-def encoder(geometry):
-    plan = PruningPlan(retention=0.25, prune_layer=1)
+def encoder(geometry, uniform_budget):
+    plan = PruningPlan(prune_layer=1, budget=uniform_budget(geometry, 16))
     return PrunedEncoder(reference_backbone(geometry), geometry, plan)
 
 
@@ -35,9 +35,9 @@ def test_the_selection_covers_every_clip_and_slice(encoder, geometry, clips):
     assert s.tokens_per_slice == geometry.tokens_per_slice
 
 
-def test_it_keeps_the_requested_count(encoder, geometry):
+def test_it_keeps_the_budgeted_count(encoder, geometry):
     s = encoder.select(torch.randn(*geometry.input_shape(batch=1)))
-    assert s.kept_per_slice == geometry.kept_per_slice(0.25)
+    assert s.kept_per_slice == s.kept_in(0) == 16 // geometry.temporal_slices
 
 
 def test_the_mask_marks_exactly_the_kept_tokens(encoder, clips):
@@ -79,12 +79,12 @@ def test_the_selection_is_reproducible(encoder, clips):
     assert torch.allclose(first.scores, second.scores)
 
 
-def test_the_spatial_prior_moves_the_selection(geometry, clips):
+def test_the_spatial_prior_moves_the_selection(geometry, clips, uniform_budget):
     """With the top rows zeroed, no token from there should survive."""
     plan = PruningPlan(
-        retention=0.25,
         prune_layer=1,
         spatial_prior=top_rows_prior(geometry.grid_size, rows=2, weight=0.0),
+        budget=uniform_budget(geometry, 16),
     )
     s = PrunedEncoder(reference_backbone(geometry), geometry, plan).select(clips)
     assert s.rows_share(0, 0, rows=2) == 0.0
@@ -98,6 +98,12 @@ def test_inspecting_a_dense_plan_is_rejected(geometry, clips):
     """With no pruning there is no selection to show."""
     encoder = PrunedEncoder(reference_backbone(geometry), geometry, PruningPlan.dense())
     with pytest.raises(ValueError, match="prunes nothing"):
+        encoder.select(clips)
+
+
+def test_inspecting_a_cut_without_a_budget_is_rejected(geometry, clips):
+    encoder = PrunedEncoder(reference_backbone(geometry), geometry, PruningPlan(prune_layer=1))
+    with pytest.raises(ValueError, match="without a budget"):
         encoder.select(clips)
 
 

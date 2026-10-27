@@ -6,19 +6,26 @@ A video transformer splits a clip into thousands of visual tokens and, in every 
 of its blocks, lets self-attention compare each token against all the others. Most of
 those tokens are redundant: in a fixed camera, large parts of the frame never change.
 
-`vitprune` keeps a fraction of them and merges the rest into their nearest kept
+`vitprune` keeps the tokens that matter and merges the rest into their nearest kept
 neighbour, so the clip embedding stays faithful to the whole scene while the
-remaining blocks run on far fewer tokens.
+remaining blocks run on far fewer tokens. How many tokens a clip keeps adapts to the
+clip: a static, repetitive scene keeps fewer than one with motion and detail.
 
 Weight values are never trained or rewritten. The wrapper shares your backbone,
-freezes its parameters and sets it to eval mode. After checking compatibility:
+freezes its parameters and sets it to eval mode. After checking compatibility and
+calibrating the budget on clips that are not part of the evaluation:
 
 ```python
 from vitprune import ClipGeometry, PrunedEncoder, PruningPlan, check_backbone
+from vitprune.core import calibrate_policy
 
 geometry = ClipGeometry.videomae_giant()
 check_backbone(backbone, geometry, reference=backbone.forward_features)
-encoder = PrunedEncoder(backbone, geometry, PruningPlan(retention=0.25))
+
+probe = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=2))
+policy = calibrate_policy(probe.statistics(calibration_clips), [256, 512, 768])
+
+encoder = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=2, budget=policy))
 features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 ```
 
@@ -108,18 +115,19 @@ The base installation registers `vitprune`; video reading and evaluation require
 the `pipeline` extra. The CLI uses the Giant geometry; Python callers choose theirs.
 
 ```bash
-vitprune cost     --retention 1.0 0.5 0.25        # analytic estimate, no GPU needed
-vitprune check    --weights w.pth --model-source /path --device cpu
-vitprune latency  --weights w.pth --model-source /path --retention 1.0 0.25
-vitprune drift    --videos data/ --weights w.pth --model-source /path
-vitprune run      --video clip.mp4 --weights w.pth --model-source /path
-vitprune extract  --videos data/ --weights w.pth --model-source /path --out feats/
-vitprune evaluate --features feats/ --downstream-project /path --downstream-config config.yaml --downstream-weights best.pth --out runs/eval
+vitprune cost      --tokens 256 512 768             # analytic estimate, no GPU needed
+vitprune check     --weights w.pth --model-source /path --device cpu
+vitprune calibrate --videos calibration/ --weights w.pth --model-source /path --out policy.json
+vitprune latency   --videos data/ --weights w.pth --model-source /path --policy policy.json
+vitprune drift     --videos data/ --weights w.pth --model-source /path --policy policy.json
+vitprune run       --video clip.mp4 --weights w.pth --model-source /path --policy policy.json
+vitprune extract   --videos data/ --weights w.pth --model-source /path --policy policy.json --out feats/
+vitprune evaluate  --features feats/ --downstream-project /path --downstream-config config.yaml --downstream-weights best.pth --out runs/eval
 ```
 
 `cost` needs the base dependencies, but no GPU, weights or video. Model commands
-automatically check dense equivalence before running. `drift --retention 1.0` is a
-repeatability check, not a replacement for comparison to the original forward.
+automatically check dense equivalence before running. Without `--policy`, `run` and
+`extract` produce the dense baseline.
 
 ## Documentation
 

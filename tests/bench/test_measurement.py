@@ -9,7 +9,7 @@ import torch
 
 from vitprune.bench.cost import budget_cost
 from vitprune.bench.drift import measure_drift
-from vitprune.bench.latency import LatencyPoint, measure_latency, measure_plans
+from vitprune.bench.latency import LatencyPoint, measure_plans
 from vitprune.bench.report import (
     EmbeddingSummary,
     PruningSummary,
@@ -48,14 +48,19 @@ def test_without_pruning_there_is_no_drift(backbone, geometry, clips):
     assert report.relative_l2_mean == pytest.approx(0.0, abs=1e-6)
 
 
-def test_pruning_introduces_drift(backbone, geometry, clips):
-    plan = PruningPlan(retention=0.25, prune_layer=1)
-    assert measure_drift(backbone, clips, plan, geometry).relative_l2_mean > 0.0
+@pytest.fixture
+def pruned(geometry, uniform_budget):
+    """A plan keeping the same number of tokens in every clip, 16 of 64 by default."""
+    return lambda tokens=16: PruningPlan(prune_layer=1, budget=uniform_budget(geometry, tokens))
 
 
-def test_pruning_more_drifts_more(backbone, geometry, clips):
-    mild = measure_drift(backbone, clips, PruningPlan(retention=0.75, prune_layer=1), geometry)
-    harsh = measure_drift(backbone, clips, PruningPlan(retention=0.125, prune_layer=1), geometry)
+def test_pruning_introduces_drift(backbone, geometry, clips, pruned):
+    assert measure_drift(backbone, clips, pruned(), geometry).relative_l2_mean > 0.0
+
+
+def test_pruning_more_drifts_more(backbone, geometry, clips, pruned):
+    mild = measure_drift(backbone, clips, pruned(48), geometry)
+    harsh = measure_drift(backbone, clips, pruned(8), geometry)
     assert harsh.relative_l2_mean > mild.relative_l2_mean
 
 
@@ -63,9 +68,9 @@ def test_the_report_counts_the_clips(backbone, geometry, clips):
     assert measure_drift(backbone, clips, PruningPlan.dense(), geometry).clips == 6
 
 
-def test_the_worst_case_is_never_better_than_the_mean(backbone, geometry, clips):
+def test_the_worst_case_is_never_better_than_the_mean(backbone, geometry, clips, pruned):
     """The mean hides the bad cases, which is why the extremes are reported."""
-    r = measure_drift(backbone, clips, PruningPlan(retention=0.25, prune_layer=1), geometry)
+    r = measure_drift(backbone, clips, pruned(), geometry)
     assert r.cosine_min <= r.cosine_p5 <= r.cosine_mean + 1e-9
     assert r.relative_l2_p95 >= r.relative_l2_mean - 1e-9
 
@@ -79,45 +84,32 @@ def test_measuring_with_no_clips_is_rejected(backbone, geometry):
 # ---------------------------------------------------------------------------
 # Latency
 # ---------------------------------------------------------------------------
-def _measure(backbone, geometry, retentions):
-    return measure_latency(
-        backbone,
-        retentions,
-        geometry,
-        prune_layer=1,
-        batch=1,
-        warmup=1,
-        iterations=2,
-        device="cpu",
-        precision="off",
-        progress=lambda _: None,
-    )
+def _measure(backbone, geometry, clips, plans, **options):
+    settings = {"warmup": 1, "iterations": 2, "device": "cpu", "precision": "off"}
+    settings.update(options)
+    return measure_plans(backbone, clips, plans, geometry, progress=lambda _: None, **settings)
 
 
-def test_one_point_per_requested_ratio(backbone, geometry):
-    points = _measure(backbone, geometry, [1.0, 0.5, 0.25])
+def test_one_point_per_plan(backbone, geometry, clips, pruned):
+    points = _measure(backbone, geometry, clips, [PruningPlan.dense(), pruned(32), pruned(16)])
     assert [p.mean_tokens for p in points] == [64, 32, 16]
 
 
-def test_the_first_ratio_is_the_reference(backbone, geometry):
-    points = _measure(backbone, geometry, [1.0, 0.25])
-    assert points[0].measured_speedup == pytest.approx(1.0, abs=1e-6)
+def test_the_dense_plan_is_the_reference(backbone, geometry, clips, pruned):
+    dense, _ = _measure(backbone, geometry, clips, [PruningPlan.dense(), pruned()])
+    assert dense.measured_speedup == pytest.approx(1.0, abs=1e-6)
+    assert dense.predicted_speedup == 1.0
+    assert dense.mean_tokens == geometry.num_tokens
 
 
-def test_a_ratio_of_one_prunes_nothing(backbone, geometry):
-    point = _measure(backbone, geometry, [1.0])[0]
-    assert point.predicted_speedup == 1.0
-    assert point.mean_tokens == geometry.num_tokens
-
-
-def test_percentiles_bracket_the_typical_time(backbone, geometry):
-    point = _measure(backbone, geometry, [1.0])[0]
+def test_percentiles_bracket_the_typical_time(backbone, geometry, clips):
+    point = _measure(backbone, geometry, clips, [PruningPlan.dense()])[0]
     assert 0.0 < point.p50_ms <= point.p95_ms
 
 
 def test_realisation_relates_measured_to_predicted():
     point = LatencyPoint(
-        plan="retention 25% after block 2",
+        plan="adaptive budget of 256/512/768 tokens after block 2",
         mean_tokens=512.0,
         ms_per_clip=10.0,
         p50_ms=9.0,
@@ -136,10 +128,7 @@ def test_an_adaptive_plan_is_timed_on_real_clips(backbone, geometry, clips):
     plan = PruningPlan(
         prune_layer=1, budget=calibrate_policy(probe.statistics(clips), [16, 32, 48])
     )
-    dense, adaptive = measure_plans(
-        backbone, clips, [PruningPlan.dense(), plan], geometry,
-        warmup=1, iterations=2, device="cpu", precision="off", progress=lambda _: None,
-    )
+    dense, adaptive = _measure(backbone, geometry, clips, [PruningPlan.dense(), plan])
     _, budget = PrunedEncoder(backbone, geometry, plan).encode_with_budget(clips)
     expected = budget_cost(geometry, budget.tokens.tolist(), 1)
     assert adaptive.mean_tokens == pytest.approx(budget.tokens.float().mean().item())
@@ -147,9 +136,9 @@ def test_an_adaptive_plan_is_timed_on_real_clips(backbone, geometry, clips):
     assert dense.measured_speedup == pytest.approx(1.0)
 
 
-def test_plans_must_start_with_the_dense_baseline(backbone, geometry, clips):
+def test_plans_must_start_with_the_dense_baseline(backbone, geometry, clips, pruned):
     with pytest.raises(ValueError, match="dense baseline"):
-        measure_plans(backbone, clips, [PruningPlan(prune_layer=1)], geometry, device="cpu")
+        _measure(backbone, geometry, clips, [pruned()])
 
 
 def test_drift_is_measured_for_an_adaptive_plan(backbone, geometry, clips):
@@ -160,35 +149,20 @@ def test_drift_is_measured_for_an_adaptive_plan(backbone, geometry, clips):
     assert measure_drift(backbone, clips, plan, geometry).relative_l2_mean > 0.0
 
 
-def test_an_empty_list_of_ratios_is_rejected(backbone, geometry):
+def test_an_empty_list_of_plans_is_rejected(backbone, geometry, clips):
     with pytest.raises(ValueError, match="at least one"):
-        measure_latency(backbone, [], geometry, device="cpu")
+        _measure(backbone, geometry, clips, [])
 
 
-def test_latency_cannot_report_a_pruned_point_as_the_dense_baseline(backbone, geometry):
-    with pytest.raises(ValueError, match="dense baseline"):
-        _measure(backbone, geometry, [0.5, 0.25])
-
-
-@pytest.mark.parametrize("kwargs", [{"batch": 0}, {"iterations": 0}, {"warmup": -1}])
-def test_invalid_timing_configuration_fails_before_running(backbone, geometry, kwargs):
+@pytest.mark.parametrize("options", [{"iterations": 0}, {"warmup": -1}])
+def test_invalid_timing_configuration_fails_before_running(backbone, geometry, clips, options):
     with pytest.raises(ValueError):
-        measure_latency(backbone, [1.0], geometry, device="cpu", **kwargs)
+        _measure(backbone, geometry, clips, [PruningPlan.dense()], **options)
 
 
-def test_an_unknown_precision_is_rejected(backbone, geometry):
+def test_an_unknown_precision_is_rejected(backbone, geometry, clips):
     with pytest.raises(ValueError, match="precision"):
-        measure_latency(
-            backbone,
-            [1.0],
-            geometry,
-            batch=1,
-            warmup=0,
-            iterations=1,
-            device="cpu",
-            precision="fp8",
-            progress=lambda _: None,
-        )
+        _measure(backbone, geometry, clips, [PruningPlan.dense()], precision="fp8")
 
 
 # ---------------------------------------------------------------------------
@@ -225,13 +199,12 @@ def test_a_single_clip_does_not_break_the_similarity():
     assert EmbeddingSummary.of(np.ones((1, 8))).consecutive_similarity_mean == 1.0
 
 
-def test_the_pruning_summary_reports_the_reduction(backbone, geometry, clips):
-    plan = PruningPlan(retention=0.25, prune_layer=1)
-    selection = PrunedEncoder(backbone, geometry, plan).select(clips[:2])
+def test_the_pruning_summary_reports_the_reduction(backbone, geometry, clips, pruned):
+    selection = PrunedEncoder(backbone, geometry, pruned()).select(clips[:2])
     summary = summarise_pruning(selection, geometry, top_rows=2)
 
     assert summary.tokens_before == geometry.num_tokens
-    assert summary.tokens_after == geometry.kept_tokens(0.25)
+    assert summary.tokens_after == 16
     assert summary.token_reduction == pytest.approx(4.0, rel=0.05)
     assert summary.mean_merge_size == pytest.approx(4.0, rel=0.01)
 
@@ -267,7 +240,7 @@ def test_budget_avoiding_the_top_is_flagged():
 def _report(pruning=None):
     return RunReport(
         video="/tmp/x.mp4",
-        plan="retention 25% after block 2",
+        plan="adaptive budget of 256/512/768 tokens after block 2",
         geometry="patch 14px",
         embeddings=EmbeddingSummary.of(np.random.default_rng(2).normal(size=(6, 16))),
         timing=TimingSummary(read_seconds=1.0, encode_seconds=8.0, clips=6, predicted_speedup=3.9),
@@ -291,9 +264,8 @@ def test_the_report_omits_the_pruning_section_on_the_dense_path():
     assert "Pruning" not in _report().render()
 
 
-def test_the_report_becomes_a_dictionary_with_derived_fields(backbone, geometry, clips):
-    plan = PruningPlan(retention=0.25, prune_layer=1)
-    selection = PrunedEncoder(backbone, geometry, plan).select(clips[:2])
+def test_the_report_becomes_a_dictionary_with_derived_fields(backbone, geometry, clips, pruned):
+    selection = PrunedEncoder(backbone, geometry, pruned()).select(clips[:2])
     data = _report(summarise_pruning(selection, geometry, 2)).to_dict()
 
     assert "seconds_per_clip" in data["timing"]

@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from vitprune.bench.cost import as_dict, budget_cost, clip_cost
+from vitprune.bench.cost import as_dict, budget_cost
 from vitprune.core.encoder import PrunedEncoder
 from vitprune.pipeline.provenance import Manifest, SourceFile
 from vitprune.pipeline.video import find_videos, read_video, to_clips
@@ -227,7 +227,7 @@ def _build_manifest(
     cost = (
         budget_cost(geometry, tokens, plan.prune_layer)
         if tokens
-        else clip_cost(geometry, plan.retention, plan.prune_layer)
+        else budget_cost(geometry, [geometry.num_tokens], 0)
     )
     return Manifest(
         settings=extraction_settings(
@@ -257,7 +257,6 @@ def extraction_settings(
     """Describe the same extraction protocol for folder and single-video runs."""
     geometry, plan = encoder.geometry, encoder.plan
     return {
-        "retention": plan.retention,
         "prune_layer": plan.prune_layer,
         "motion_weight": plan.motion_weight,
         "size_biased_attention": plan.size_biased_attention,

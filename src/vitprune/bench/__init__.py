@@ -9,13 +9,12 @@ from vitprune.bench.cost import (
     CorpusBudget,
     Roofline,
     budget_cost,
-    clip_cost,
     corpus_budget,
     roofline,
 )
 from vitprune.bench.drift import DriftReport, measure_drift
 from vitprune.bench.hardware import Accelerator, accelerator, custom
-from vitprune.bench.latency import LatencyPoint, measure_latency, measure_plans
+from vitprune.bench.latency import LatencyPoint, measure_plans
 from vitprune.bench.report import (
     EmbeddingSummary,
     PruningSummary,
@@ -37,11 +36,9 @@ __all__ = [
     "TimingSummary",
     "accelerator",
     "budget_cost",
-    "clip_cost",
     "corpus_budget",
     "custom",
     "measure_drift",
-    "measure_latency",
     "measure_plans",
     "roofline",
     "summarise_pruning",

@@ -35,7 +35,10 @@ Custom forwards with unrelated side effects are outside this restoration guarant
 
 ## Adaptive budget
 
-With `PruningPlan(budget=policy)`, each clip keeps the tokens its regime assigns.
+A plan prunes only with a budget: `PruningPlan(prune_layer=2, budget=policy)`. Without
+one, the plan is dense and the cut only marks where `statistics()` measures clips, as
+calibration needs; `select()` and `encode_with_budget()` then refuse to run. Each clip
+keeps the tokens its regime assigns.
 After the cut the batch is grouped by that count and each group runs the remaining
 blocks on its own: nothing is padded, and a batch costs at most one sub-batch per
 level. Embeddings come back in input order. Decisions depend only on each clip, so
@@ -48,8 +51,8 @@ gives a clip's own count.
 ## Validation and failure modes
 
 - Geometry counts must be positive integers; divisibility rules are checked.
-- Retention is finite and in `(0,1]`, even for a disabled cut.
-- `prune_layer` is an integer from `0` to the actual depth; `0` disables pruning.
+- `prune_layer` is an integer from `0` to the actual depth; `0` disables pruning, and
+  a budget with `prune_layer` 0 is rejected.
 - `motion_weight` is in `[0,1]`; NaN/Inf are rejected.
 - Prior: one-dimensional finite non-negative tensor with `tokens_per_slice` values.
 - Budget: a `BudgetPolicy` whose levels are multiples of the temporal slices and at
@@ -60,8 +63,9 @@ gives a clip's own count.
 - No reference means incomplete approval: `ok=False`. Use `raise_on_failure=False`
   to inspect that partial report. Default behaviour is to raise `ValueError`.
 
-This intentionally tightens the earlier permissive behaviour. Ratios above 1 and
-cuts past the last block are errors, not aliases for the dense path.
+Cuts past the last block are errors, not aliases for the dense path. The fixed
+retention ratio of earlier versions no longer exists: the adaptive budget decides how
+many tokens each clip keeps.
 
 ## Mathematical guarantees
 

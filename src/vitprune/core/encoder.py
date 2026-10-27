@@ -23,7 +23,7 @@ considerably more complexity.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from math import isfinite
 from numbers import Real
 from typing import NamedTuple
@@ -32,7 +32,7 @@ import torch
 from torch import nn
 
 from vitprune.core.attention import run_block
-from vitprune.core.geometry import ClipGeometry, validate_prune_layer, validate_retention
+from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import initial_sizes, merge_tokens, size_weighted_mean
 from vitprune.core.policy import BudgetPolicy
@@ -43,21 +43,21 @@ from vitprune.core.statistics import ClipStatistics, clip_statistics
 
 @dataclass(frozen=True)
 class PruningPlan:
-    """How much to prune, where, and by what criterion.
+    """Where to prune, by what criterion, and how many tokens each clip keeps.
 
     Attributes:
-        retention: retention ratio, the fraction of tokens kept per temporal slice.
-            Ignored when a ``budget`` is set.
         prune_layer: which block to prune after, counting from 1. Zero disables
             pruning entirely.
-        motion_weight: weight of motion against uniqueness in the score.
+        motion_weight: weight of motion against uniqueness in the score that decides
+            which tokens survive.
         spatial_prior: per-position multiplier, or ``None``.
         size_biased_attention: enables the proportional attention described in
             :mod:`vitprune.core.attention`. Experimental.
-        budget: the adaptive policy deciding how many tokens each clip keeps.
+        budget: the adaptive policy deciding how many tokens each clip keeps. Without
+            one, nothing is pruned; the cut still marks where clip statistics are
+            measured, which is what calibration needs.
     """
 
-    retention: float = 0.25
     prune_layer: int = 2
     motion_weight: float = 0.5
     spatial_prior: torch.Tensor | None = None
@@ -65,7 +65,6 @@ class PruningPlan:
     budget: BudgetPolicy | None = None
 
     def __post_init__(self) -> None:
-        validate_retention(self.retention)
         validate_prune_layer(self.prune_layer)
         if (
             isinstance(self.motion_weight, bool)
@@ -82,8 +81,11 @@ class PruningPlan:
                 raise ValueError("spatial_prior must be a one-dimensional tensor")
             if not torch.isfinite(prior).all() or (prior < 0).any():
                 raise ValueError("spatial_prior must contain finite, non-negative values")
-        if self.budget is not None and not isinstance(self.budget, BudgetPolicy):
-            raise ValueError("budget must be a BudgetPolicy")
+        if self.budget is not None:
+            if not isinstance(self.budget, BudgetPolicy):
+                raise ValueError("budget must be a BudgetPolicy")
+            if self.prune_layer == 0:
+                raise ValueError("a budget needs a pruning layer; prune_layer is 0")
 
     def validate_for(self, geometry: ClipGeometry) -> None:
         """Validate the cut, prior and budget against a concrete backbone geometry."""
@@ -101,32 +103,20 @@ class PruningPlan:
         The baseline for every comparison, and the sanity check: with this plan the
         result has to match the backbone's own forward pass exactly.
         """
-        return cls(retention=1.0, prune_layer=0)
+        return cls(prune_layer=0)
 
     @property
     def prunes(self) -> bool:
-        return self.prune_layer > 0 and (self.budget is not None or self.retention < 1.0)
-
-    def with_retention(self, retention: float) -> PruningPlan:
-        """A copy at a different retention ratio, for sweeping the curve."""
-        validate_retention(retention)
-        if retention == 1.0:
-            return PruningPlan.dense()
-        return replace(self, retention=retention)
+        return self.budget is not None
 
     def describe(self) -> str:
         if not self.prunes:
             return "no pruning (dense baseline)"
         extra = ", size-biased attention" if self.size_biased_attention else ""
-        if self.budget is not None:
-            levels = "/".join(str(level) for level in self.budget.levels)
-            return (
-                f"adaptive budget of {levels} tokens after block {self.prune_layer}, "
-                f"motion_weight {self.motion_weight}, policy {self.budget.version}{extra}"
-            )
+        levels = "/".join(str(level) for level in self.budget.levels)
         return (
-            f"retention {self.retention:.0%} after block {self.prune_layer}, "
-            f"motion_weight {self.motion_weight}{extra}"
+            f"adaptive budget of {levels} tokens after block {self.prune_layer}, "
+            f"motion_weight {self.motion_weight}, policy {self.budget.version}{extra}"
         )
 
 
@@ -189,7 +179,7 @@ class PrunedEncoder(nn.Module):
 
         Only an adaptive plan has a per-clip budget to report.
         """
-        if self.plan.budget is None or not self.plan.prunes:
+        if self.plan.budget is None:
             raise ValueError("only an adaptive plan decides a budget per clip; set plan.budget")
         return self._encode(clips)
 
@@ -205,11 +195,11 @@ class PrunedEncoder(nn.Module):
         forty, so inspection costs a fraction of a full extraction.
 
         The decision is taken along the same path as :meth:`encode`, with the same
-        score and the same criterion. It is not an approximate reconstruction. Under an
-        adaptive budget, clips keeping fewer tokens than the widest one are padded with
-        position ``-1`` and size zero.
+        score and the same criterion. It is not an approximate reconstruction. Clips
+        keeping fewer tokens than the widest one are padded with position ``-1`` and
+        size zero.
         """
-        grid = self._grid_at_cut(clips)
+        grid = self._grid_at_cut(clips, needs_budget=True)
         keeps, _ = self._keeps(grid)
         scores = score_tokens(grid, self.plan.motion_weight, self.plan.spatial_prior)
 
@@ -275,18 +265,13 @@ class PrunedEncoder(nn.Module):
             embeddings[members] = pooled
         return embeddings, budget
 
-    def _keeps(self, grid: torch.Tensor) -> tuple[torch.Tensor, ClipBudget | None]:
-        """Tokens kept per slice by each clip, and the budget record when adaptive."""
-        slices = self.geometry.temporal_slices
+    def _keeps(self, grid: torch.Tensor) -> tuple[torch.Tensor, ClipBudget]:
+        """Tokens kept per slice by each clip, and the record of the decision."""
         budget = self.plan.budget
-        if budget is None:
-            keep = self.geometry.kept_per_slice(self.plan.retention)
-            return torch.full((grid.shape[0],), keep, dtype=torch.long, device=grid.device), None
-
         statistics = clip_statistics(grid)
         regimes = budget.regimes(statistics)
         tokens = torch.tensor(budget.levels, device=regimes.device)[regimes]
-        return tokens // slices, ClipBudget(tokens, regimes, statistics)
+        return tokens // self.geometry.temporal_slices, ClipBudget(tokens, regimes, statistics)
 
     @staticmethod
     def _groups(keeps: torch.Tensor):
@@ -294,14 +279,19 @@ class PrunedEncoder(nn.Module):
         for keep in keeps.unique().tolist():
             yield keep, (keeps == keep).nonzero(as_tuple=True)[0]
 
-    def _grid_at_cut(self, clips: torch.Tensor) -> torch.Tensor:
+    def _grid_at_cut(self, clips: torch.Tensor, needs_budget: bool = False) -> torch.Tensor:
         """Run the blocks up to the pruning layer and return the token grid there."""
         self._validate_configuration()
         self._check_eval()
-        if not self.plan.prunes:
+        if self.plan.prune_layer == 0:
             raise ValueError(
                 "a dense plan prunes nothing, so there is no pruning layer to inspect. "
-                "Use a retention ratio below 1."
+                "Set prune_layer."
+            )
+        if needs_budget and self.plan.budget is None:
+            raise ValueError(
+                "a plan without a budget prunes nothing, so there is no selection to "
+                "inspect. Set plan.budget."
             )
 
         tokens = self._tokenise(clips)

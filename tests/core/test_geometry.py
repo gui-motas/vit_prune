@@ -26,27 +26,6 @@ def test_video_geometry_reports_a_temporal_axis():
     assert ClipGeometry.videomae_giant().has_temporal_axis
 
 
-def test_quarter_retention_keeps_sixty_four_per_slice():
-    g = ClipGeometry.videomae_giant()
-    assert g.kept_per_slice(0.25) == 64
-    assert g.kept_tokens(0.25) == 512
-
-
-def test_full_retention_keeps_everything():
-    g = ClipGeometry.videomae_giant()
-    assert g.kept_tokens(1.0) == g.num_tokens
-
-
-def test_tiny_retention_still_keeps_one_token_per_slice():
-    assert ClipGeometry.videomae_giant().kept_per_slice(0.0001) == 1
-
-
-@pytest.mark.parametrize("retention", [0.0, -0.1, 1.5])
-def test_retention_outside_the_range_is_rejected(retention):
-    with pytest.raises(ValueError, match="retention"):
-        ClipGeometry.videomae_giant().kept_per_slice(retention)
-
-
 def test_input_shape_follows_the_requested_batch():
     assert ClipGeometry.videomae_giant().input_shape(batch=4) == (4, 3, 16, 224, 224)
 

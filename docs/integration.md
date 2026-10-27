@@ -6,14 +6,23 @@ level. Both are covered here.
 ## The short version
 
 ```python
-from vitprune.core import ClipGeometry, PrunedEncoder, PruningPlan, check_backbone
+from vitprune.core import (
+    ClipGeometry, PrunedEncoder, PruningPlan, calibrate_policy, check_backbone
+)
 
 geometry = ClipGeometry.videomae_giant()
 check_backbone(backbone, geometry, reference=backbone.forward_features)
 
-encoder = PrunedEncoder(backbone, geometry, PruningPlan(retention=0.25))
+probe = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=2))
+policy = calibrate_policy(probe.statistics(calibration_clips), [256, 512, 768])
+
+encoder = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=2, budget=policy))
 features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 ```
+
+A plan prunes only with a budget. `PruningPlan(prune_layer=2)` without one leaves the
+embedding dense: the cut only marks where `statistics()` measures the clips for
+calibration. `calibration_clips` must not come from the data you evaluate on.
 
 Weight values are not changed. `PrunedEncoder` shares the supplied backbone,
 freezes `requires_grad` and calls `eval()` recursively. Do not share it with a
@@ -102,7 +111,7 @@ Reference output must be a finite `[B,D]` tensor (or the first element of a tupl
 ```python
 from vitprune.bench import measure_drift
 
-report = measure_drift(backbone, clips, PruningPlan(retention=0.25), geometry)
+report = measure_drift(backbone, clips, PruningPlan(prune_layer=2, budget=policy), geometry)
 print(report.describe())
 ```
 
@@ -138,18 +147,21 @@ backbone = reference_backbone(geometry)
 assert check_backbone(backbone, geometry, reference=backbone.forward_features).ok
 ```
 
-## Choosing a retention ratio
+## Choosing the budget
 
-There is no universally right value. Report the whole curve rather than a single
-point: pick a range, measure quality and latency at each, and let the trade-off be
-visible.
+The levels -- tokens kept per clip in each regime -- and `motion_balance` are design
+parameters. Fix them, and calibrate, before evaluating. Choosing them by looking at
+evaluation results fits the evaluation set and inflates the number.
 
-Using the same data to choose a ratio and to report the result fits the evaluation
-set, which inflates the number. Presenting the curve avoids that entirely, since
-nothing was chosen.
+The default levels, 256, 512 and 768 tokens, are symmetric around 512, a quarter of
+the Giant's 2048. Calibration splits the calibration clips into equal regimes, so the
+mean on those clips is the mean of the levels. On other clips it can differ: the
+extraction manifest records the count each clip actually kept.
 
-`{1.0, 0.5, 0.35, 0.25, 0.15}` is a reasonable starting range. 1.0 is the baseline
-and must be included.
+Calibrate once per camera setup. The reference values describe what is much or little
+redundancy and motion for the footage they were measured on; a different mounting or
+framing shifts both. A different checkpoint, cut, geometry or frame step changes the
+statistics too, and a policy file refuses a different cut or frame step.
 
 ## Installing only what you need
 

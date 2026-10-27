@@ -106,7 +106,7 @@ def model(tmp_path, monkeypatch):
     return ["--weights", str(weights), "--model-source", str(source), "--device", "cpu"]
 
 
-def test_calibrate_then_extract_with_the_policy(model, videos, tmp_path):
+def test_calibrate_then_extract_with_the_policy(model, videos, tmp_path, capsys):
     policy, out = tmp_path / "policy.json", tmp_path / "features"
     common = [*model, "--videos", str(videos), "--precision", "off", "--prune-layer", "1"]
     levels = ["--levels", *map(str, LEVELS)]
@@ -122,6 +122,21 @@ def test_calibrate_then_extract_with_the_policy(model, videos, tmp_path):
     assert manifest["cost"]["tokens_pruned"] == pytest.approx(np.mean(tokens))
     with np.load(out / "a.npz") as features:
         assert features["feats"].shape[0] == 3
+
+    capsys.readouterr()
+    assert main(["cost", "--policy", str(policy), "--prune-layer", "1"]) == 0
+    assert "adaptive budget: 16, 32, 48 tokens per clip" in capsys.readouterr().out
+
+
+def test_extraction_without_a_policy_is_the_dense_baseline(model, videos, tmp_path):
+    out = tmp_path / "dense"
+    arguments = [*model, "--videos", str(videos), "--precision", "off", "--out", str(out)]
+    assert main(["extract", *arguments]) == 0
+
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["settings"]["budget"] is None
+    assert manifest["cost"]["predicted_speedup"] == 1.0
+    assert all("budget" not in video for video in manifest["outputs"].values())
 
 
 def test_extraction_refuses_a_policy_from_another_cut(model, videos, tmp_path):

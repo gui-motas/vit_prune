@@ -1,8 +1,7 @@
 """Token grid arithmetic for a video clip.
 
 No neural network runs here. This module answers counting questions only: how many
-tokens a clip produces, how they are laid out in space and time, and how many remain
-after pruning.
+tokens a clip produces and how they are laid out in space and time.
 
 All of that arithmetic lives in one place on purpose. When ``image_size /
 patch_size`` and ``frames_per_clip / tubelet_size`` are recomputed across several
@@ -32,17 +31,6 @@ LARGE_EMBED_DIM = 1024
 LARGE_DEPTH = 24
 LARGE_HEADS = 16
 LARGE_MLP_RATIO = 4.0
-
-
-def validate_retention(retention: float) -> None:
-    """Reject invalid ratios even when a caller would otherwise skip pruning."""
-    if (
-        isinstance(retention, bool)
-        or not isinstance(retention, Real)
-        or not isfinite(retention)
-        or not 0.0 < retention <= 1.0
-    ):
-        raise ValueError(f"retention must be finite and in (0, 1], got {retention}")
 
 
 def validate_prune_layer(layer: int, depth: int | None = None) -> None:
@@ -195,22 +183,6 @@ class ClipGeometry:
     def has_temporal_axis(self) -> bool:
         """False for a single-slice geometry, where the motion term cannot apply."""
         return self.temporal_slices > 1
-
-    def kept_per_slice(self, retention: float) -> int:
-        """Tokens kept in each temporal slice after pruning.
-
-        ``retention`` is the retention ratio. The result is rounded and never drops
-        below 1, so a slice cannot end up empty.
-
-        >>> ClipGeometry.videomae_giant().kept_per_slice(0.25)
-        64
-        """
-        validate_retention(retention)
-        return max(1, round(self.tokens_per_slice * retention))
-
-    def kept_tokens(self, retention: float) -> int:
-        """Tokens left in the whole clip after pruning."""
-        return self.temporal_slices * self.kept_per_slice(retention)
 
     def input_shape(self, batch: int = 1) -> tuple[int, int, int, int, int]:
         """Shape the backbone expects: batch, channels, frames, height, width."""

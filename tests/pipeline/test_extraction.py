@@ -14,9 +14,12 @@ from vitprune.pipeline.provenance import SourceFile
 
 
 @pytest.fixture
-def encoder():
+def encoder(uniform_budget):
     geometry = reference_geometry(depth=2)
-    plan = PruningPlan(spatial_prior=torch.linspace(0.1, 1.0, geometry.tokens_per_slice))
+    plan = PruningPlan(
+        spatial_prior=torch.linspace(0.1, 1.0, geometry.tokens_per_slice),
+        budget=uniform_budget(geometry, 16),
+    )
     return PrunedEncoder(reference_backbone(geometry), geometry, plan)
 
 
@@ -44,6 +47,9 @@ def test_extraction_records_the_actual_protocol_and_fingerprints(tmp_path, monke
     assert record["weights"]["sha256"] == hashlib.sha256(weights.read_bytes()).hexdigest()
     assert record["settings"]["model_definition"]["sha256"]
     assert record["environment"]["vitprune_source_sha256"]
+    assert record["settings"]["budget"]["version"] == encoder.plan.budget.version
+    assert record["outputs"]["clip"]["budget"]["tokens"] == [16, 16]
+    assert record["cost"]["tokens_pruned"] == 16
     with np.load(folder / "clip.npz") as result:
         assert result["feats"].shape == (2, encoder.geometry.embed_dim)
         assert result["feats"].dtype == np.float32
@@ -84,7 +90,9 @@ def test_encode_clips_rejects_empty_batches(encoder):
         extraction.encode_clips(encoder, torch.empty(*encoder.geometry.input_shape(batch=0)))
 
 
-def test_non_finite_features_are_not_saved(encoder, monkeypatch):
+def test_non_finite_features_are_not_saved(monkeypatch):
+    geometry = reference_geometry(depth=2)
+    encoder = PrunedEncoder(reference_backbone(geometry), geometry, PruningPlan.dense())
     monkeypatch.setattr(encoder, "encode", lambda clips: torch.full((1, 32), float("nan")))
     with pytest.raises(ValueError, match="non-finite"):
         extraction.encode_clips(

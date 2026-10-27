@@ -81,8 +81,7 @@ def geometry():
 
 @pytest.fixture
 def encoder(geometry):
-    plan = PruningPlan(retention=0.25, prune_layer=1)
-    return PrunedEncoder(reference_backbone(geometry), geometry, plan)
+    return PrunedEncoder(reference_backbone(geometry), geometry, PruningPlan(prune_layer=1))
 
 
 @pytest.fixture

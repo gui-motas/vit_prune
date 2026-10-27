@@ -111,8 +111,8 @@ class BlockOptional(importlib.abc.MetaPathFinder):
             raise ImportError('optional dependency blocked: ' + fullname)
 sys.meta_path.insert(0, BlockOptional())
 from vitprune import ClipGeometry, PrunedEncoder, PruningPlan, check_backbone
-from vitprune.bench import clip_cost
-assert clip_cost(ClipGeometry.videomae_giant(), 0.25, 2).predicted_speedup > 1
+from vitprune.bench import budget_cost
+assert budget_cost(ClipGeometry.videomae_giant(), [512], 2).predicted_speedup > 1
 assert 'vitprune.pipeline' not in sys.modules
 """
     result = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True)

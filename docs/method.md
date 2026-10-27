@@ -72,9 +72,30 @@ Both scores are normalised to a common range before combining, because uniquenes
 a cosine between -1 and 1 while motion is an unbounded distance. Normalisation is per
 slice, so that one busy slice cannot flatten the scores everywhere else.
 
-With a **retention ratio** of 0.25, the 64 highest-scoring tokens in each slice
-survive, out of 256. The clip drops to 512 tokens, and the pairs per block fall from
-4.2 million to 262 thousand -- sixteen times fewer.
+### How many tokens each clip keeps
+
+The score decides *which* tokens survive. *How many* is decided per clip, because
+clips differ: a still, repetitive scene can lose most of its tokens, while one with
+motion and detail needs more of them.
+
+Two clip-level statistics are measured on the same grid, before any merge:
+**redundancy**, the mean cosine similarity of the tokens to the clip mean and to their
+slice mean, and **motion**, the mean distance between the same position in
+consecutive slices. Neither is normalised per slice: that would erase exactly the
+differences between clips the budget has to see.
+
+Both have no natural scale, so each is turned into its rank among reference values
+measured on **calibration clips**, which must not be part of the evaluation. The ranks
+combine into `g = β·motion + (1 − β)·(1 − redundancy)`: more motion and less
+redundancy ask for more tokens. Thresholds on `g` sort clips into a few **regimes**,
+each with a fixed token count, by default 256, 512 and 768. Calibration places the
+thresholds so the regimes are equally frequent on the calibration clips, which puts
+the mean at 512 tokens.
+
+Each slice of a clip keeping 512 tokens keeps its 64 highest-scoring tokens, out of
+256; the pairs per block fall from 4.2 million to 262 thousand, sixteen times fewer.
+A few regimes rather than a continuous count let a batch run as at most one
+sub-batch per regime, without padding.
 
 ## 5. Why dropping tokens is not enough
 
@@ -83,7 +104,7 @@ This is the part that decides whether the method is usable at all.
 The backbone produces the **clip embedding** by mean pooling over its tokens. That
 embedding is what a downstream model consumes.
 
-If pruning simply discarded 1536 tokens, the mean would change meaning. Only the
+If pruning simply discarded the other tokens, the mean would change meaning. Only the
 salient regions would remain, so the embedding would describe a crop rather than a
 scene. And a downstream model trained on dense embeddings expects the old meaning.
 
@@ -95,7 +116,7 @@ twelve tokens rather than one.
 
 At the final pooling, each token counts according to its size. An exact identity
 follows: **size-weighted pooling over the survivors equals mean pooling over all the
-original tokens.** There are four times fewer tokens and the embedding is unchanged.
+original tokens.** There are fewer tokens and the pooled mean is unchanged.
 
 Similarity ignores magnitude, which is deliberate: two ceiling tokens point the same
 way even if one is better lit, and that is the equivalence the merge exploits.
@@ -167,12 +188,14 @@ hypothesis to test.
 
 1. A clip becomes 2048 visual tokens
 2. Self-attention is quadratic, and runs in every block
-3. After two blocks, each token is scored by uniqueness and by motion
-4. The highest scoring survive; the rest are merged into their nearest match, carrying
-   their size forward
-5. The remaining blocks run on four times fewer tokens
+3. After two blocks, the clip's redundancy and motion decide how many tokens it keeps
+4. Each token is scored by uniqueness and by motion; the highest scoring survive and
+   the rest are merged into their nearest match, carrying their size forward
+5. The remaining blocks run on the reduced tokens, one sub-batch per regime
 6. Size-weighted pooling honours merged token masses; final embeddings can drift
 
-Analytically that predicts roughly a 3.9x speedup at 25% retention. Analytic
-predictions and clocks are different things, and the distance between them is what
+With the default levels the clips average 512 tokens, but the expected cost is higher
+than that of 512 tokens in every clip: attention is quadratic, so the cost has to come
+from the counts the clips actually kept. Analytic predictions and clocks are
+different things, and the distance between them is what
 [`experiments.md`](experiments.md) is about.

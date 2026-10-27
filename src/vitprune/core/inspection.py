@@ -4,7 +4,7 @@ The embedding coming out of the backbone says nothing about the path taken to
 produce it. This module makes the decision visible: which grid positions survived,
 what score each received, and what size each kept token ended up carrying.
 
-That serves two purposes. For debugging: if the method is spending retention budget
+That serves two purposes. For debugging: if the method is spending its token budget
 on an irrelevant region, this is where it shows. For explaining: a figure showing
 that the hand was kept and the ceiling pruned says more than a paragraph.
 
@@ -100,7 +100,7 @@ class TokenSelection:
         return flat.reshape(self.grid_size, self.grid_size)
 
     def rows_share(self, clip: int, slice_index: int, rows: int) -> float:
-        """Fraction of the retention budget spent on the first rows of the frame.
+        """Fraction of the kept tokens spent on the first rows of the frame.
 
         Compare it against the share of screen area those rows occupy. A budget share
         well above the area share means the method is drawn to the top of the frame,

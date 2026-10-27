@@ -52,9 +52,9 @@ def downstream(tmp_path):
 
 @pytest.fixture
 def features(tmp_path):
-    folder = tmp_path / "features_r025"
+    folder = tmp_path / "features_adaptive"
     folder.mkdir()
-    Manifest(settings={"retention": 0.25, "stride": 16}).write(folder)
+    Manifest(settings={"prune_layer": 2, "stride": 16}).write(folder)
     return folder
 
 
@@ -131,7 +131,7 @@ def test_without_a_record_the_supplied_stride_is_used(downstream, tmp_path):
 def test_the_recorded_stride_reaches_the_configuration(downstream, tmp_path):
     folder = tmp_path / "features_s8"
     folder.mkdir()
-    Manifest(settings={"retention": 0.5, "stride": 8}).write(folder)
+    Manifest(settings={"prune_layer": 2, "stride": 8}).write(folder)
 
     destination = tmp_path / "out"
     prepare_config(EvaluationRequest(folder, downstream, destination))
@@ -252,5 +252,5 @@ def test_evaluation_records_command_inputs_and_exit_status(
     record = json.loads((out / EVALUATION_MANIFEST).read_text(encoding="utf-8"))
     assert record["statistics"]["returncode"] == code
     assert record["settings"]["prepared_config"]["sha256"]
-    assert record["settings"]["extraction_manifest"]["settings"]["retention"] == 0.25
+    assert record["settings"]["extraction_manifest"]["settings"]["prune_layer"] == 2
     assert record["weights"]["sha256"]

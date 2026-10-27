@@ -26,101 +26,102 @@ def clips(geometry):
     return torch.randn(*geometry.input_shape(batch=2), dtype=torch.float64)
 
 
+@pytest.fixture
+def pruned(geometry, uniform_budget):
+    """A plan keeping the same number of tokens in every clip, 16 of 64 by default."""
+
+    def plan(tokens=16, **settings):
+        settings.setdefault("prune_layer", 1)
+        return PruningPlan(budget=uniform_budget(geometry, tokens), **settings)
+
+    return plan
+
+
 def test_the_dense_plan_reproduces_the_original_forward(backbone, geometry, clips):
     expected = reference_encode(backbone, clips)
     actual = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
     assert torch.allclose(expected, actual, atol=1e-12)
 
 
-def test_full_retention_also_reproduces_the_original(backbone, geometry, clips):
-    """Keeping 100% must be indistinguishable from not pruning, even with a cut
-    requested."""
-    plan = PruningPlan(retention=1.0, prune_layer=2)
+def test_a_cut_without_a_budget_prunes_nothing(backbone, geometry, clips):
+    """The cut only marks where statistics are measured; pruning needs a budget."""
+    plan = PruningPlan(prune_layer=2)
+    assert not plan.prunes
     expected = reference_encode(backbone, clips)
     assert torch.allclose(expected, PrunedEncoder(backbone, geometry, plan).encode(clips))
 
 
-def test_pruning_returns_one_embedding_per_clip(backbone, geometry, clips):
-    plan = PruningPlan(retention=0.25, prune_layer=1)
-    assert PrunedEncoder(backbone, geometry, plan).encode(clips).shape == (2, geometry.embed_dim)
+def test_a_budget_of_every_token_reproduces_the_original(backbone, geometry, clips, pruned):
+    plan = pruned(geometry.num_tokens, prune_layer=2)
+    expected = reference_encode(backbone, clips)
+    assert torch.allclose(expected, PrunedEncoder(backbone, geometry, plan).encode(clips))
 
 
-def test_pruning_changes_the_embedding(backbone, geometry, clips):
+def test_pruning_returns_one_embedding_per_clip(backbone, geometry, clips, pruned):
+    out = PrunedEncoder(backbone, geometry, pruned()).encode(clips)
+    assert out.shape == (2, geometry.embed_dim)
+
+
+def test_pruning_changes_the_embedding(backbone, geometry, clips, pruned):
     """If nothing changed, pruning would not be happening."""
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
-    plan = PruningPlan(retention=0.25, prune_layer=1)
-    pruned = PrunedEncoder(backbone, geometry, plan).encode(clips)
-    assert not torch.allclose(dense, pruned, atol=1e-6)
+    out = PrunedEncoder(backbone, geometry, pruned()).encode(clips)
+    assert not torch.allclose(dense, out, atol=1e-6)
 
 
 def test_pruning_after_the_last_block_leaves_the_embedding_almost_unchanged(
-    backbone, geometry, clips
+    backbone, geometry, clips, pruned
 ):
     """With an identity token norm and no remaining blocks, the identity holds."""
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
-    plan = PruningPlan(retention=0.25, prune_layer=geometry.depth)
-    late = PrunedEncoder(backbone, geometry, plan).encode(clips)
+    late = PrunedEncoder(backbone, geometry, pruned(prune_layer=geometry.depth)).encode(clips)
     assert torch.allclose(dense, late, atol=1e-10)
 
 
 def test_nonlinear_token_norm_can_break_final_equivalence_even_after_the_last_block(
-    backbone, geometry, clips
+    backbone, geometry, clips, pruned
 ):
     backbone.norm = torch.nn.LayerNorm(geometry.embed_dim).double()
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
-    late = PrunedEncoder(
-        backbone, geometry, PruningPlan(prune_layer=geometry.depth)
-    ).encode(clips)
+    late = PrunedEncoder(backbone, geometry, pruned(prune_layer=geometry.depth)).encode(clips)
     assert not torch.allclose(dense, late, atol=1e-8)
 
 
-def test_pruning_early_drifts_more_than_pruning_late(backbone, geometry, clips):
+def test_pruning_early_drifts_more_than_pruning_late(backbone, geometry, clips, pruned):
     """The more blocks run after the merge, the further the result moves."""
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
 
     def drift(layer):
-        plan = PruningPlan(retention=0.25, prune_layer=layer)
-        return (PrunedEncoder(backbone, geometry, plan).encode(clips) - dense).norm().item()
+        out = PrunedEncoder(backbone, geometry, pruned(prune_layer=layer)).encode(clips)
+        return (out - dense).norm().item()
 
     assert drift(1) > drift(geometry.depth)
 
 
-@pytest.mark.parametrize("retention", [0.75, 0.5, 0.25, 0.125])
-def test_several_retention_ratios_produce_valid_embeddings(backbone, geometry, clips, retention):
-    plan = PruningPlan(retention=retention, prune_layer=2)
-    out = PrunedEncoder(backbone, geometry, plan).encode(clips)
+@pytest.mark.parametrize("tokens", [48, 32, 16, 8])
+def test_several_budgets_produce_valid_embeddings(backbone, geometry, clips, pruned, tokens):
+    out = PrunedEncoder(backbone, geometry, pruned(tokens, prune_layer=2)).encode(clips)
     assert out.shape == (2, geometry.embed_dim)
     assert torch.isfinite(out).all()
 
 
-def test_the_spatial_prior_changes_the_selection(backbone, geometry, clips):
-    without = PrunedEncoder(backbone, geometry, PruningPlan(retention=0.25, prune_layer=1)).encode(
-        clips
-    )
-    with_prior = PrunedEncoder(
-        backbone,
-        geometry,
-        PruningPlan(
-            retention=0.25,
-            prune_layer=1,
-            spatial_prior=top_rows_prior(geometry.grid_size, rows=2, weight=0.0),
-        ),
-    ).encode(clips)
+def test_the_spatial_prior_changes_the_selection(backbone, geometry, clips, pruned):
+    without = PrunedEncoder(backbone, geometry, pruned()).encode(clips)
+    prior = top_rows_prior(geometry.grid_size, rows=2, weight=0.0)
+    with_prior = PrunedEncoder(backbone, geometry, pruned(spatial_prior=prior)).encode(clips)
     assert not torch.allclose(without, with_prior, atol=1e-6)
 
 
 def test_the_size_bias_does_not_affect_the_dense_path(backbone, geometry, clips):
     """Without pruning every size is 1, so enabling the bias changes nothing."""
-    plan = PruningPlan(retention=1.0, prune_layer=0, size_biased_attention=True)
+    plan = PruningPlan(prune_layer=0, size_biased_attention=True)
     expected = reference_encode(backbone, clips)
     assert torch.allclose(expected, PrunedEncoder(backbone, geometry, plan).encode(clips))
 
 
-def test_the_size_bias_affects_the_pruned_path(backbone, geometry, clips):
-    plain = PruningPlan(retention=0.25, prune_layer=1)
-    biased = PruningPlan(retention=0.25, prune_layer=1, size_biased_attention=True)
-    a = PrunedEncoder(backbone, geometry, plain).encode(clips)
-    b = PrunedEncoder(backbone, geometry, biased).encode(clips)
+def test_the_size_bias_affects_the_pruned_path(backbone, geometry, clips, pruned):
+    a = PrunedEncoder(backbone, geometry, pruned()).encode(clips)
+    b = PrunedEncoder(backbone, geometry, pruned(size_biased_attention=True)).encode(clips)
     assert not torch.allclose(a, b, atol=1e-8)
 
 
@@ -146,18 +147,9 @@ def test_the_dense_plan_describes_itself_as_the_baseline():
     assert not PruningPlan.dense().prunes
 
 
-def test_setting_retention_to_one_yields_the_dense_plan():
-    plan = PruningPlan(retention=0.25, prune_layer=3)
-    assert not plan.with_retention(1.0).prunes
-    assert plan.with_retention(0.5).prune_layer == 3
-
-
-@pytest.mark.parametrize("retention", [0, -0.1, 1.1, float("nan"), float("inf"), True])
-def test_invalid_retention_is_rejected_at_construction(retention):
-    with pytest.raises(ValueError, match="retention"):
-        PruningPlan(retention=retention)
-    with pytest.raises(ValueError, match="retention"):
-        PruningPlan().with_retention(retention)
+def test_a_budget_needs_a_pruning_layer(geometry, uniform_budget):
+    with pytest.raises(ValueError, match="pruning layer"):
+        PruningPlan(prune_layer=0, budget=uniform_budget(geometry, 16))
 
 
 @pytest.mark.parametrize("layer", [-1, 1.5, True])
@@ -166,10 +158,11 @@ def test_invalid_layer_is_rejected(layer):
         PruningPlan(prune_layer=layer)
 
 
-@pytest.mark.parametrize("retention", [0.25, 1.0])
-def test_cut_past_the_backbone_is_rejected_even_when_dense(backbone, geometry, retention):
+@pytest.mark.parametrize("with_budget", [False, True])
+def test_cut_past_the_backbone_is_rejected(backbone, geometry, uniform_budget, with_budget):
+    budget = uniform_budget(geometry, 16) if with_budget else None
     with pytest.raises(ValueError, match="exceeds"):
-        PrunedEncoder(backbone, geometry, PruningPlan(retention=retention, prune_layer=100))
+        PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=100, budget=budget))
 
 
 def test_encode_and_select_reject_a_replaced_invalid_plan(backbone, geometry, clips):
@@ -207,11 +200,11 @@ def test_input_shape_is_checked(backbone, geometry, clips):
         PrunedEncoder(backbone, geometry).encode(clips[:, :, 0])
 
 
-def test_size_biased_attention_requires_a_videomae_block(geometry):
+def test_size_biased_attention_requires_a_videomae_block(geometry, pruned):
     backbone = reference_backbone(geometry)
     backbone.blocks[-1] = torch.nn.Identity()
     with pytest.raises(ValueError, match="size-biased attention"):
-        PrunedEncoder(backbone, geometry, PruningPlan(size_biased_attention=True))
+        PrunedEncoder(backbone, geometry, pruned(prune_layer=2, size_biased_attention=True))
 
 
 @pytest.mark.parametrize("prior", [torch.ones(2, 2), torch.tensor([float("nan")]),
