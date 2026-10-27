@@ -4,7 +4,8 @@ Commands for integration, measurement and application:
 
 * ``cost`` -- count operations. No GPU, checkpoint or video needed.
 * ``check`` -- verify the dense encoder against the original forward.
-* ``latency`` -- measure wall-clock. Needs a GPU and a checkpoint, but no video.
+* ``calibrate`` -- fit the adaptive budget on calibration videos.
+* ``latency`` -- measure wall-clock. Needs a GPU and a checkpoint; video for a policy.
 * ``drift`` -- measure embedding drift. Needs video, but no labels.
 * ``run`` -- run on one video and report what came out.
 * ``extract`` -- produce embeddings for a whole folder. The expensive stage.
@@ -101,26 +102,50 @@ def _run_cost(args) -> int:
 # latency
 # ---------------------------------------------------------------------------
 def _run_latency(args) -> int:
-    from vitprune.bench.latency import measure_latency
+    from vitprune.bench.latency import measure_latency, measure_plans
+    from vitprune.core.encoder import PruningPlan
 
+    geometry = ClipGeometry.videomae_giant()
+    if args.policy and not args.videos:
+        raise ValueError("an adaptive budget depends on the content; pass --videos")
     backbone = _load_backbone(args)
     print(RULE)
     print(f"measuring on {args.device}, precision {args.precision}, batch {args.batch}")
     print(f"{args.warmup} warmup runs, {args.iterations} timed")
     print(RULE)
 
-    points = measure_latency(
-        backbone,
-        args.retention,
-        geometry=ClipGeometry.videomae_giant(),
-        prune_layer=args.prune_layer,
-        batch=args.batch,
-        warmup=args.warmup,
-        iterations=args.iterations,
-        device=args.device,
-        precision=args.precision,
-        size_biased_attention=args.size_biased_attention,
-    )
+    if args.policy:
+        from vitprune.pipeline.calibration import read_policy
+        from vitprune.pipeline.video import gather_clips
+
+        plan = PruningPlan(
+            prune_layer=args.prune_layer,
+            size_biased_attention=args.size_biased_attention,
+            budget=read_policy(args.policy, args.prune_layer, args.frame_step),
+        )
+        points = measure_plans(
+            backbone,
+            gather_clips(args.videos, geometry, args.stride, args.frame_step, args.batch),
+            [PruningPlan.dense(), plan],
+            geometry,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            device=args.device,
+            precision=args.precision,
+        )
+    else:
+        points = measure_latency(
+            backbone,
+            args.retention,
+            geometry=geometry,
+            prune_layer=args.prune_layer,
+            batch=args.batch,
+            warmup=args.warmup,
+            iterations=args.iterations,
+            device=args.device,
+            precision=args.precision,
+            size_biased_attention=args.size_biased_attention,
+        )
 
     print("\nRealisation is measured speedup divided by predicted. Below 100%, part of")
     print("the saving went into costs the operation count cannot see. That is a")
@@ -133,28 +158,15 @@ def _run_latency(args) -> int:
 # drift
 # ---------------------------------------------------------------------------
 def _run_drift(args) -> int:
-    import torch
-
     from vitprune.bench.drift import measure_drift
-    from vitprune.pipeline.video import find_videos, read_video, to_clips
+    from vitprune.pipeline.video import gather_clips
 
     if args.clips < 1:
         raise ValueError("clips must be positive")
     backbone = _load_backbone(args)
     geometry = ClipGeometry.videomae_giant()
     plan = _plan_from(args, geometry)
-
-    videos = find_videos(args.videos)
-    if not videos:
-        raise FileNotFoundError(f"no video found in {args.videos}")
-
-    gathered, total = [], 0
-    for video in videos:
-        gathered.append(to_clips(read_video(video), geometry, args.stride, args.frame_step))
-        total += gathered[-1].shape[0]
-        if total >= args.clips:
-            break
-    clips = torch.cat(gathered)[: args.clips]
+    clips = gather_clips(args.videos, geometry, args.stride, args.frame_step, args.clips)
 
     print(RULE)
     print(f"{clips.shape[0]} clips | {plan.describe()}")
@@ -178,10 +190,15 @@ def _run_single(args) -> int:
     import numpy as np
     import torch
 
-    from vitprune.bench.cost import as_dict, clip_cost
+    from vitprune.bench.cost import as_dict, budget_cost, clip_cost
     from vitprune.bench.report import EmbeddingSummary, RunReport, TimingSummary, summarise_pruning
     from vitprune.core.encoder import PrunedEncoder, PruningPlan
-    from vitprune.pipeline.extraction import FEATURE_KEY, encode_clips, extraction_settings
+    from vitprune.pipeline.extraction import (
+        FEATURE_KEY,
+        encode_clips,
+        encode_clips_with_budget,
+        extraction_settings,
+    )
     from vitprune.pipeline.provenance import Manifest, SourceFile
     from vitprune.pipeline.video import read_video, to_clips
 
@@ -206,7 +223,13 @@ def _run_single(args) -> int:
     print(f"[2/4] backbone loaded | {plan.describe()}")
 
     started = time.perf_counter()
-    embeddings = encode_clips(encoder, clips, args.batch, args.device, args.precision)
+    budget = None
+    if plan.budget is not None:
+        embeddings, budget = encode_clips_with_budget(
+            encoder, clips, args.batch, args.device, args.precision
+        )
+    else:
+        embeddings = encode_clips(encoder, clips, args.batch, args.device, args.precision)
     encode_seconds = time.perf_counter() - started
     print(f"[3/4] embeddings produced in {encode_seconds:.1f}s")
 
@@ -233,7 +256,11 @@ def _run_single(args) -> int:
     destination.mkdir(parents=True, exist_ok=True)
     np.savez(destination / f"{stem}.npz", **{FEATURE_KEY: embeddings})
 
-    cost = clip_cost(geometry, plan.retention, plan.prune_layer)
+    cost = (
+        budget_cost(geometry, budget["tokens"], plan.prune_layer)
+        if budget is not None
+        else clip_cost(geometry, plan.retention, plan.prune_layer)
+    )
     report = RunReport(
         video=str(Path(args.video).resolve()),
         plan=plan.describe(),
@@ -263,6 +290,7 @@ def _run_single(args) -> int:
             "source": as_dict(SourceFile.of(args.video)),
             "feature_file": as_dict(SourceFile.of(destination / f"{stem}.npz")),
             "clips": int(clips.shape[0]),
+            **({"budget": budget} if budget is not None else {}),
         }},
         statistics={"read_seconds": read_seconds, "encode_seconds": encode_seconds},
     ).write(destination)
@@ -301,6 +329,44 @@ def _run_extract(args) -> int:
         model_source=args.model_source,
     )
     print(f"run record: {manifest}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# calibrate
+# ---------------------------------------------------------------------------
+def _run_calibrate(args) -> int:
+    from vitprune.core.encoder import PrunedEncoder, PruningPlan
+    from vitprune.pipeline.calibration import calibrate_videos, write_policy
+
+    if Path(args.out).exists():
+        raise FileExistsError(f"refusing to overwrite the policy at {args.out}")
+    geometry = ClipGeometry.videomae_giant()
+    backbone = _load_backbone(args)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=args.prune_layer))
+
+    print(RULE)
+    print(f"calibrating levels {args.levels} after block {args.prune_layer}")
+    print("calibration videos must not be part of the evaluation")
+    print(RULE)
+
+    content = calibrate_videos(
+        encoder,
+        args.videos,
+        args.levels,
+        motion_balance=args.motion_balance,
+        stride=args.stride,
+        frame_step=args.frame_step,
+        batch=args.batch,
+        device=args.device,
+        precision=args.precision,
+        limit=args.clips,
+        weights_path=args.weights,
+    )
+    path = write_policy(args.out, content)
+    policy = content["policy"]
+    print(f"\npolicy {policy['version']}: thresholds {policy['thresholds']}")
+    print(f"from {content['calibration']['clips']} clips, written to {path}")
     return 0
 
 
@@ -371,6 +437,18 @@ def _plan_from(args, geometry: ClipGeometry):
     prior = top_rows_prior(geometry.grid_size, args.prior_top_rows, args.prior_weight)
     if args.prior_top_rows == 0:
         prior = None
+    if args.policy:
+        from vitprune.pipeline.calibration import read_policy
+
+        plan = PruningPlan(
+            prune_layer=args.prune_layer,
+            motion_weight=args.motion_weight,
+            spatial_prior=prior,
+            size_biased_attention=args.size_biased_attention,
+            budget=read_policy(args.policy, args.prune_layer, args.frame_step),
+        )
+        plan.validate_for(geometry)
+        return plan
     plan = PruningPlan(
         retention=args.retention,
         prune_layer=args.prune_layer,
@@ -440,6 +518,9 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="experimental: weight attention by merged token size",
     )
+    parser.add_argument(
+        "--policy", help="adaptive budget written by 'vitprune calibrate'; replaces --retention"
+    )
 
 
 def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
@@ -462,6 +543,19 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_model_arguments(check)
     check.set_defaults(handler=_run_check)
 
+    calibrate = commands.add_parser("calibrate", help="fit the adaptive budget on videos")
+    _add_model_arguments(calibrate)
+    _add_run_arguments(calibrate)
+    calibrate.add_argument("--videos", required=True, help="calibration videos, not evaluated")
+    calibrate.add_argument("--out", required=True, help="policy file to write")
+    calibrate.add_argument(
+        "--levels", type=int, nargs="+", default=[256, 512, 768], help="tokens per regime"
+    )
+    calibrate.add_argument("--motion-balance", type=float, default=0.5)
+    calibrate.add_argument("--prune-layer", type=int, default=2)
+    calibrate.add_argument("--clips", type=int, help="stop after this many clips")
+    calibrate.set_defaults(handler=_run_calibrate)
+
     cost = commands.add_parser("cost", help="estimate cost; needs no GPU or checkpoint")
     cost.add_argument("--retention", type=float, nargs="+", default=[1.0, 0.5, 0.35, 0.25, 0.15])
     cost.add_argument("--prune-layer", type=int, default=2)
@@ -475,9 +569,13 @@ def _build_parser() -> argparse.ArgumentParser:
     cost.add_argument("--save", help="write the result as JSON")
     cost.set_defaults(handler=_run_cost)
 
-    latency = commands.add_parser("latency", help="measure wall-clock; needs no video")
+    latency = commands.add_parser("latency", help="measure wall-clock against the dense path")
     _add_model_arguments(latency)
     latency.add_argument("--retention", type=float, nargs="+", default=[1.0, 0.5, 0.25, 0.15])
+    latency.add_argument("--policy", help="time this adaptive budget instead of --retention")
+    latency.add_argument("--videos", help="clips to time; required with --policy")
+    latency.add_argument("--stride", type=int, default=16)
+    latency.add_argument("--frame-step", type=int, default=2)
     latency.add_argument("--prune-layer", type=int, default=2)
     latency.add_argument("--batch", type=int, default=8)
     latency.add_argument("--warmup", type=int, default=5)

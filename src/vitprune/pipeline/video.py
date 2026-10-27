@@ -137,6 +137,29 @@ def count_clips(
     return len(_clip_starts(total_frames, clip_span(geometry, frame_step), stride))
 
 
+def gather_clips(
+    videos: str | Path,
+    geometry: ClipGeometry,
+    stride: int,
+    frame_step: int,
+    count: int,
+) -> torch.Tensor:
+    """The first ``count`` clips of a folder of videos, in a fixed order."""
+    if count < 1:
+        raise ValueError("the clip count must be positive")
+    found = find_videos(videos)
+    if not found:
+        raise FileNotFoundError(f"no video found in {videos}")
+
+    gathered, total = [], 0
+    for video in found:
+        gathered.append(to_clips(read_video(video), geometry, stride, frame_step))
+        total += gathered[-1].shape[0]
+        if total >= count:
+            break
+    return torch.cat(gathered)[:count]
+
+
 def _clip_starts(total: int, span: int, stride: int) -> list[int]:
     if total < span:
         return [0]

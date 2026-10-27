@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from vitprune.bench.cost import as_dict, clip_cost
+from vitprune.bench.cost import as_dict, budget_cost, clip_cost
 from vitprune.core.encoder import PrunedEncoder
 from vitprune.pipeline.provenance import Manifest, SourceFile
 from vitprune.pipeline.video import find_videos, read_video, to_clips
@@ -79,10 +79,12 @@ def extract_folder(
     started = time.time()
     per_video: dict[str, dict] = {}
     total_clips = 0
+    tokens: list[int] = []
 
     for position, video in enumerate(found, start=1):
         moment = time.time()
-        embeddings = extract_video(encoder, video, stride, frame_step, batch, device, precision)
+        clips = to_clips(read_video(video), encoder.geometry, stride, frame_step)
+        embeddings, budget = _encode(encoder, clips, batch, device, precision)
         np.savez(destination / f"{video.stem}.npz", **{FEATURE_KEY: embeddings})
 
         elapsed = time.time() - moment
@@ -94,6 +96,9 @@ def extract_folder(
             "embed_dim": int(embeddings.shape[1]),
             "seconds": round(elapsed, 2),
         }
+        if budget is not None:
+            per_video[video.stem]["budget"] = budget
+            tokens.extend(budget["tokens"])
         total_clips += int(embeddings.shape[0])
         progress(f"[{position}/{len(found)}] {video.name}: {embeddings.shape} in {elapsed:.1f}s")
 
@@ -111,6 +116,7 @@ def extract_folder(
         precision,
         weights_path,
         model_source,
+        tokens,
     )
     written = manifest.write(destination)
     progress(
@@ -150,22 +156,55 @@ def encode_clips(
     precision: str = "fp16",
 ) -> np.ndarray:
     """Run the clips through the encoder in batches."""
+    return _encode(encoder, clips, batch, device, precision)[0]
+
+
+@torch.no_grad()
+def encode_clips_with_budget(
+    encoder: PrunedEncoder,
+    clips: torch.Tensor,
+    batch: int = 8,
+    device: str = "cuda",
+    precision: str = "fp16",
+) -> tuple[np.ndarray, dict[str, list]]:
+    """Run the clips in batches and report what the adaptive budget decided for each.
+
+    Returns:
+        The embeddings, and lists of tokens, regime, redundancy and motion, one entry
+        per clip in order.
+    """
+    if encoder.plan.budget is None:
+        raise ValueError("only an adaptive plan decides a budget per clip")
+    return _encode(encoder, clips, batch, device, precision)
+
+
+def _encode(encoder, clips, batch, device, precision) -> tuple[np.ndarray, dict | None]:
     _validate_encoding(batch, precision)
     if clips.shape[0] < 1:
         raise ValueError("at least one clip is needed to encode")
     dtype = _precision(precision)
     on_gpu = str(device).startswith("cuda")
+    adaptive = encoder.plan.budget is not None and encoder.plan.prunes
     pieces = []
+    record: dict[str, list] = {"tokens": [], "regimes": [], "redundancy": [], "motion": []}
 
     for start in range(0, clips.shape[0], batch):
         chunk = clips[start : start + batch].to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
-            embeddings = encoder.encode(chunk).float().cpu()
+            if adaptive:
+                embeddings, budget = encoder.encode_with_budget(chunk)
+                record["tokens"] += budget.tokens.tolist()
+                record["regimes"] += budget.regimes.tolist()
+                record["redundancy"] += budget.statistics.redundancy.tolist()
+                record["motion"] += budget.statistics.motion.tolist()
+            else:
+                embeddings = encoder.encode(chunk)
+            embeddings = embeddings.float().cpu()
             if not torch.isfinite(embeddings).all():
                 raise ValueError("encoder produced non-finite embeddings")
             pieces.append(embeddings)
 
-    return torch.cat(pieces).numpy().astype(np.float32)
+    return torch.cat(pieces).numpy().astype(np.float32), record if adaptive else None
 
 
 def _build_manifest(
@@ -181,15 +220,21 @@ def _build_manifest(
     precision,
     weights_path,
     model_source=None,
+    tokens=None,
 ) -> Manifest:
     geometry = encoder.geometry
     plan = encoder.plan
+    cost = (
+        budget_cost(geometry, tokens, plan.prune_layer)
+        if tokens
+        else clip_cost(geometry, plan.retention, plan.prune_layer)
+    )
     return Manifest(
         settings=extraction_settings(
             encoder, stride, frame_step, batch, device, precision, model_source
         ),
         weights=SourceFile.of(weights_path) if weights_path else None,
-        cost=as_dict(clip_cost(geometry, plan.retention, plan.prune_layer)),
+        cost=as_dict(cost),
         outputs=per_video,
         statistics={
             "videos": len(found),
@@ -219,6 +264,7 @@ def extraction_settings(
         "spatial_prior": (
             None if plan.spatial_prior is None else plan.spatial_prior.detach().cpu().tolist()
         ),
+        "budget": None if plan.budget is None else plan.budget.to_dict(),
         "stride": stride,
         "frame_step": frame_step,
         "batch": batch,

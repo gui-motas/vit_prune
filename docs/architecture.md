@@ -99,6 +99,7 @@ models.
 | Module | Owns |
 |---|---|
 | `video` | decoding and clip assembly, including stride and frame step |
+| `calibration` | fitting the adaptive budget on calibration videos, and the policy file |
 | `checkpoint` | loading weights with shape verification before installation |
 | `extraction` | walking a folder and writing embeddings in the expected format |
 | `provenance` | recording the conditions each result was produced under |
