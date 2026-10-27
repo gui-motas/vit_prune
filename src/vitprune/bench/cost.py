@@ -21,7 +21,9 @@ Treating these numbers as a result would sidestep the question worth asking.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from numbers import Integral
 
 from vitprune.bench.hardware import Accelerator
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer, validate_retention
@@ -37,10 +39,13 @@ SECONDS_PER_HOUR = 3600
 
 @dataclass(frozen=True)
 class ClipCost:
-    """The cost of processing a single clip."""
+    """The cost of processing a single clip.
+
+    ``tokens_pruned`` is the mean over clips when they keep different counts.
+    """
 
     tokens_dense: int
-    tokens_pruned: int
+    tokens_pruned: float
     gmacs_dense: float
     gmacs_pruned: float
 
@@ -50,7 +55,7 @@ class ClipCost:
 
     def describe(self) -> str:
         return (
-            f"{self.tokens_dense} -> {self.tokens_pruned} tokens | "
+            f"{self.tokens_dense} -> {self.tokens_pruned:g} tokens | "
             f"{self.gmacs_dense:.0f} -> {self.gmacs_pruned:.0f} GMAC/clip | "
             f"predicted speedup {self.predicted_speedup:.2f}x"
         )
@@ -105,14 +110,44 @@ def clip_cost(geometry: ClipGeometry, retention: float, prune_layer: int) -> Cli
     """
     validate_retention(retention)
     validate_prune_layer(prune_layer, geometry.depth)
-    dense = _accumulate(geometry, retention=1.0, prune_layer=0)
-    pruned = _accumulate(geometry, retention, prune_layer)
     prunes = prune_layer > 0 and retention < 1.0
+    kept = geometry.kept_tokens(retention) if prunes else geometry.num_tokens
     return ClipCost(
         tokens_dense=geometry.num_tokens,
-        tokens_pruned=geometry.kept_tokens(retention) if prunes else geometry.num_tokens,
-        gmacs_dense=dense,
-        gmacs_pruned=pruned,
+        tokens_pruned=kept,
+        gmacs_dense=_accumulate(geometry, geometry.num_tokens, 0),
+        gmacs_pruned=_accumulate(geometry, kept, prune_layer),
+    )
+
+
+def budget_cost(geometry: ClipGeometry, tokens: Sequence[int], prune_layer: int) -> ClipCost:
+    """Expected cost per clip when each clip keeps its own number of tokens.
+
+    The attention term grows with the square of the token count, so the cost of the
+    mean is not the mean of the costs: two clips keeping 256 and 768 tokens cost more
+    than two keeping 512. Pass the counts the clips actually kept, not their average.
+
+    Args:
+        geometry: the clip geometry.
+        tokens: tokens kept after the cut, one count per clip.
+        prune_layer: the block the cut follows.
+    """
+    validate_prune_layer(prune_layer, geometry.depth)
+    counts = list(tokens)
+    if not counts:
+        raise ValueError("provide at least one token count")
+    for count in counts:
+        if isinstance(count, bool) or not isinstance(count, Integral):
+            raise ValueError(f"token counts must be integers, got {count!r}")
+        if not 1 <= count <= geometry.num_tokens:
+            raise ValueError(f"token counts must be between 1 and {geometry.num_tokens}")
+
+    per_count = {count: _accumulate(geometry, count, prune_layer) for count in set(counts)}
+    return ClipCost(
+        tokens_dense=geometry.num_tokens,
+        tokens_pruned=sum(counts) / len(counts) if prune_layer else geometry.num_tokens,
+        gmacs_dense=_accumulate(geometry, geometry.num_tokens, 0),
+        gmacs_pruned=sum(per_count[count] for count in counts) / len(counts),
     )
 
 
@@ -175,13 +210,14 @@ def as_dict(item) -> dict:
     return data
 
 
-def _accumulate(geometry: ClipGeometry, retention: float, prune_layer: int) -> float:
+def _accumulate(geometry: ClipGeometry, kept: int, prune_layer: int) -> float:
+    """GMACs for one clip that keeps ``kept`` tokens after block ``prune_layer``."""
     tokens = geometry.num_tokens
     total = 0.0
     for index in range(geometry.depth):
         total += _block_macs(tokens, geometry)
-        if prune_layer > 0 and (index + 1) == prune_layer and retention < 1.0:
-            tokens = geometry.kept_tokens(retention)
+        if prune_layer > 0 and (index + 1) == prune_layer:
+            tokens = kept
     return total / 1e9
 
 

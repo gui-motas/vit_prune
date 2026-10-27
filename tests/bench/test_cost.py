@@ -4,7 +4,7 @@ its base imports; these tests do not directly execute torch operations.
 
 import pytest
 
-from vitprune.bench.cost import clip_cost, corpus_budget, parameter_count, roofline
+from vitprune.bench.cost import budget_cost, clip_cost, corpus_budget, parameter_count, roofline
 from vitprune.bench.hardware import CATALOG, accelerator, custom
 from vitprune.core.geometry import ClipGeometry
 
@@ -130,3 +130,36 @@ def test_every_catalogued_card_describes_itself():
 def test_invalid_plans_are_not_reported_as_dense_costs(geometry, retention, layer):
     with pytest.raises(ValueError):
         clip_cost(geometry, retention, layer)
+
+
+# ---------------------------------------------------------------------------
+# Token budgets
+# ---------------------------------------------------------------------------
+def test_a_budget_of_every_token_costs_the_dense_path(geometry):
+    cost = budget_cost(geometry, [geometry.num_tokens] * 3, 2)
+    assert cost.predicted_speedup == pytest.approx(1.0)
+
+
+def test_the_mean_of_the_costs_exceeds_the_cost_of_the_mean(geometry):
+    """Attention is quadratic: 256 and 768 tokens cost more than 512 and 512."""
+    spread = budget_cost(geometry, [256, 768], 2)
+    even = budget_cost(geometry, [512, 512], 2)
+    assert spread.tokens_pruned == even.tokens_pruned == 512
+    assert spread.gmacs_pruned > even.gmacs_pruned
+
+
+def test_the_expected_cost_averages_the_clips(geometry):
+    low, high = budget_cost(geometry, [256], 2), budget_cost(geometry, [768], 2)
+    mixed = budget_cost(geometry, [256, 768, 768], 2)
+    assert mixed.gmacs_pruned == pytest.approx((low.gmacs_pruned + 2 * high.gmacs_pruned) / 3)
+
+
+def test_fewer_tokens_cost_less(geometry):
+    fewer, more = (budget_cost(geometry, [count], 2).gmacs_pruned for count in (256, 768))
+    assert fewer < more
+
+
+@pytest.mark.parametrize("tokens", [[], [0], [4096], [512.0], [True]])
+def test_invalid_token_counts_are_rejected(geometry, tokens):
+    with pytest.raises(ValueError):
+        budget_cost(geometry, tokens, 2)

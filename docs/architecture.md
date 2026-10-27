@@ -69,9 +69,9 @@ Measurement. Separate because measuring is not part of the method.
 | Module | Owns |
 |---|---|
 | `hardware` | accelerator figures, as data rather than constants in code |
-| `cost` | the analytic operation count, roofline and corpus budget |
+| `cost` | the analytic operation count, the expected cost of per-clip token counts, roofline and corpus budget |
 | `drift` | how far the pruned embedding moves from the dense one |
-| `latency` | wall-clock timing, and realisation against the prediction |
+| `latency` | wall-clock timing with percentiles, and realisation against the prediction |
 | `report` | turning an embedding matrix into something readable |
 
 ### Decisions worth recording

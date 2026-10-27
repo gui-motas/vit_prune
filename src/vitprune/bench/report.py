@@ -79,12 +79,13 @@ class PruningSummary:
     """What pruning actually did.
 
     Present so that pruning is verifiable. Without these numbers, a run where the
-    retention setting was silently ignored would look exactly like a correct one.
+    budget was silently ignored would look exactly like a correct one. Under an
+    adaptive budget, token counts are means over the inspected clips.
     """
 
     tokens_before: int
-    tokens_after: int
-    kept_per_slice: int
+    tokens_after: float
+    kept_per_slice: float
     tokens_per_slice: int
     mean_merge_size: float
     largest_merge_size: float
@@ -97,9 +98,9 @@ class PruningSummary:
 
     def describe(self) -> list[str]:
         lines = [
-            f"  tokens            {self.tokens_before} -> {self.tokens_after} "
+            f"  tokens            {self.tokens_before} -> {self.tokens_after:g} "
             f"({self.token_reduction:.2f}x fewer)",
-            f"  per slice         keeping {self.kept_per_slice} of {self.tokens_per_slice}",
+            f"  per slice         keeping {self.kept_per_slice:g} of {self.tokens_per_slice}",
             f"  merge             mean {self.mean_merge_size:.1f} tokens per kept, "
             f"largest {self.largest_merge_size:.0f}",
             f"  top rows          {self.top_rows_budget_share:.1%} of budget for "
@@ -207,10 +208,11 @@ def summarise_pruning(selection, geometry, top_rows: int = 4) -> PruningSummary:
             budget_shares.append(selection.rows_share(clip, index, top_rows))
 
     stacked = np.concatenate(merge_sizes)
+    kept = float(np.mean([selection.kept_in(clip) for clip in range(selection.clips)]))
     return PruningSummary(
         tokens_before=geometry.num_tokens,
-        tokens_after=selection.temporal_slices * selection.kept_per_slice,
-        kept_per_slice=selection.kept_per_slice,
+        tokens_after=selection.temporal_slices * kept,
+        kept_per_slice=kept,
         tokens_per_slice=selection.tokens_per_slice,
         mean_merge_size=round(float(stacked.mean()), 3),
         largest_merge_size=round(float(stacked.max()), 1),
