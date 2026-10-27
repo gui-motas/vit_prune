@@ -41,8 +41,10 @@ class TokenSelection:
         scores: score of every token, ``[batch, temporal_slices, tokens]``.
         kept: kept positions, ``[batch, temporal_slices, kept]``, in grid order:
             position ``n`` sits at row ``n // grid_size``, column ``n % grid_size``.
+            Under an adaptive budget clips keep different counts; the shorter ones are
+            padded with ``-1``.
         sizes: how many original tokens each kept token stands for,
-            ``[batch, temporal_slices, kept]``.
+            ``[batch, temporal_slices, kept]``, zero where ``kept`` is padding.
         grid_size: patches per side of the grid.
     """
 
@@ -61,11 +63,16 @@ class TokenSelection:
 
     @property
     def kept_per_slice(self) -> int:
+        """The widest count kept per slice in this batch; see :meth:`kept_in`."""
         return self.kept.shape[2]
 
     @property
     def tokens_per_slice(self) -> int:
         return self.scores.shape[2]
+
+    def kept_in(self, clip: int) -> int:
+        """Tokens one clip kept in each of its slices."""
+        return int((self.kept[clip, 0] >= 0).sum())
 
     def keep_mask(self, clip: int, slice_index: int) -> np.ndarray:
         """Boolean mask of the positions that survived.
@@ -74,7 +81,7 @@ class TokenSelection:
             ``[grid_size, grid_size]``, laid out as the frame is.
         """
         flat = np.zeros(self.tokens_per_slice, dtype=bool)
-        flat[self.kept[clip, slice_index].cpu().numpy()] = True
+        flat[self._positions(clip, slice_index)] = True
         return flat.reshape(self.grid_size, self.grid_size)
 
     def score_grid(self, clip: int, slice_index: int) -> np.ndarray:
@@ -88,8 +95,8 @@ class TokenSelection:
         neighbours, which usually means a large uniform region.
         """
         flat = np.zeros(self.tokens_per_slice, dtype=np.float32)
-        positions = self.kept[clip, slice_index].cpu().numpy()
-        flat[positions] = self.sizes[clip, slice_index].cpu().numpy()
+        positions = self._positions(clip, slice_index)
+        flat[positions] = self.sizes[clip, slice_index, : positions.size].cpu().numpy()
         return flat.reshape(self.grid_size, self.grid_size)
 
     def rows_share(self, clip: int, slice_index: int, rows: int) -> float:
@@ -103,7 +110,13 @@ class TokenSelection:
         return float(mask[:rows].sum()) / max(int(mask.sum()), 1)
 
     def describe(self) -> str:
+        counts = sorted({self.kept_in(clip) for clip in range(self.clips)})
+        keeping = str(counts[0]) if len(counts) == 1 else f"{counts[0]} to {counts[-1]}"
         return (
             f"{self.clips} clips x {self.temporal_slices} temporal slices | "
-            f"keeping {self.kept_per_slice} of {self.tokens_per_slice} per slice"
+            f"keeping {keeping} of {self.tokens_per_slice} per slice"
         )
+
+    def _positions(self, clip: int, slice_index: int) -> np.ndarray:
+        positions = self.kept[clip, slice_index].cpu().numpy()
+        return positions[positions >= 0]

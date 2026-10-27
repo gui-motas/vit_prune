@@ -67,8 +67,8 @@ class BudgetPolicy:
 
         for name in ("redundancy_reference", "motion_reference"):
             values = getattr(self, name)
-            if not values or not all(_is_real(v) and isfinite(v) for v in values):
-                raise ValueError(f"{name} must be a non-empty sequence of finite numbers")
+            if len(values) < 2 or not all(_is_real(v) and isfinite(v) for v in values):
+                raise ValueError(f"{name} must hold at least two finite numbers")
             if any(b < a for a, b in pairwise(values)):
                 raise ValueError(f"{name} must be in ascending order")
 
@@ -204,16 +204,27 @@ def calibrate_policy(
 
 
 def _rank(values: torch.Tensor, reference: tuple[float, ...]) -> torch.Tensor:
-    """Mid-rank of each value among the reference values, in ``[0, 1]``.
+    """Position of each value in the reference distribution, in ``[0, 1]``.
 
-    Monotonic, and ties are handled evenly: a value equal to every reference value
-    sits at 0.5.
+    The reference values are evenly spaced quantiles, and the position is interpolated
+    linearly between them, which approximates the cumulative distribution of the
+    calibration clips. Monotonic; values outside the reference clamp to 0 or 1, and a
+    value tied with a run of reference values sits in the middle of that run.
     """
     knots = torch.tensor(reference, dtype=values.dtype, device=values.device)
+    last = len(reference) - 1
     values = values.contiguous()
-    below = torch.searchsorted(knots, values, right=False)
-    upto = torch.searchsorted(knots, values, right=True)
-    return (below + upto).to(values.dtype) / (2 * len(reference))
+    left = torch.searchsorted(knots, values, right=False)
+    right = torch.searchsorted(knots, values, right=True)
+
+    lower = knots[(left - 1).clamp(min=0)]
+    upper = knots[left.clamp(max=last)]
+    gap = upper - lower
+    fraction = ((values - lower) / torch.where(gap > 0, gap, torch.ones_like(gap))).clamp(0, 1)
+    between = (left - 1).to(values.dtype) + fraction
+    tied = (left + right - 1).to(values.dtype) / 2
+    position = torch.where(right > left, tied, between).clamp(0, last)
+    return position / last
 
 
 def _is_real(value: object) -> bool:

@@ -33,6 +33,18 @@ training flags, parameter gradient flags and CPU/probe-device RNG state, also on
 failure. Device and dtype are inferred unless a device is explicitly supplied.
 Custom forwards with unrelated side effects are outside this restoration guarantee.
 
+## Adaptive budget
+
+With `PruningPlan(budget=policy)`, each clip keeps the tokens its regime assigns.
+After the cut the batch is grouped by that count and each group runs the remaining
+blocks on its own: nothing is padded, and a batch costs at most one sub-batch per
+level. Embeddings come back in input order. Decisions depend only on each clip, so
+encoding a batch equals encoding its clips one by one, up to floating-point error.
+
+`encode_with_budget` also returns each clip's tokens, regime and statistics. `select`
+pads clips that keep fewer tokens with position `-1` and size zero; `kept_in(clip)`
+gives a clip's own count.
+
 ## Validation and failure modes
 
 - Geometry counts must be positive integers; divisibility rules are checked.
@@ -40,6 +52,8 @@ Custom forwards with unrelated side effects are outside this restoration guarant
 - `prune_layer` is an integer from `0` to the actual depth; `0` disables pruning.
 - `motion_weight` is in `[0,1]`; NaN/Inf are rejected.
 - Prior: one-dimensional finite non-negative tensor with `tokens_per_slice` values.
+- Budget: a `BudgetPolicy` whose levels are multiples of the temporal slices and at
+  most the grid's token count; its statistics must be finite.
 - Invalid plans are rejected at construction/binding and rechecked before execution.
 - `check_backbone` requires an exact-shaped finite reference tensor, or a tuple
   with that tensor first. Broadcasting cannot make a comparison pass.

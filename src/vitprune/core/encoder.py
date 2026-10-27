@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from math import isfinite
 from numbers import Real
+from typing import NamedTuple
 
 import torch
 from torch import nn
@@ -34,6 +35,7 @@ from vitprune.core.attention import run_block
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer, validate_retention
 from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import initial_sizes, merge_tokens, size_weighted_mean
+from vitprune.core.policy import BudgetPolicy
 from vitprune.core.protocols import missing_attributes
 from vitprune.core.scoring import score_tokens
 from vitprune.core.statistics import ClipStatistics, clip_statistics
@@ -45,12 +47,14 @@ class PruningPlan:
 
     Attributes:
         retention: retention ratio, the fraction of tokens kept per temporal slice.
+            Ignored when a ``budget`` is set.
         prune_layer: which block to prune after, counting from 1. Zero disables
             pruning entirely.
         motion_weight: weight of motion against uniqueness in the score.
         spatial_prior: per-position multiplier, or ``None``.
         size_biased_attention: enables the proportional attention described in
             :mod:`vitprune.core.attention`. Experimental.
+        budget: the adaptive policy deciding how many tokens each clip keeps.
     """
 
     retention: float = 0.25
@@ -58,6 +62,7 @@ class PruningPlan:
     motion_weight: float = 0.5
     spatial_prior: torch.Tensor | None = None
     size_biased_attention: bool = False
+    budget: BudgetPolicy | None = None
 
     def __post_init__(self) -> None:
         validate_retention(self.retention)
@@ -77,13 +82,17 @@ class PruningPlan:
                 raise ValueError("spatial_prior must be a one-dimensional tensor")
             if not torch.isfinite(prior).all() or (prior < 0).any():
                 raise ValueError("spatial_prior must contain finite, non-negative values")
+        if self.budget is not None and not isinstance(self.budget, BudgetPolicy):
+            raise ValueError("budget must be a BudgetPolicy")
 
     def validate_for(self, geometry: ClipGeometry) -> None:
-        """Validate the cut and prior against a concrete backbone geometry."""
+        """Validate the cut, prior and budget against a concrete backbone geometry."""
         validate_prune_layer(self.prune_layer, geometry.depth)
         if self.spatial_prior is not None:
             if self.spatial_prior.numel() != geometry.tokens_per_slice:
                 raise ValueError("spatial_prior positions must match geometry.tokens_per_slice")
+        if self.budget is not None:
+            self.budget.validate_for(geometry)
 
     @classmethod
     def dense(cls) -> PruningPlan:
@@ -96,7 +105,7 @@ class PruningPlan:
 
     @property
     def prunes(self) -> bool:
-        return self.prune_layer > 0 and self.retention < 1.0
+        return self.prune_layer > 0 and (self.budget is not None or self.retention < 1.0)
 
     def with_retention(self, retention: float) -> PruningPlan:
         """A copy at a different retention ratio, for sweeping the curve."""
@@ -109,10 +118,30 @@ class PruningPlan:
         if not self.prunes:
             return "no pruning (dense baseline)"
         extra = ", size-biased attention" if self.size_biased_attention else ""
+        if self.budget is not None:
+            levels = "/".join(str(level) for level in self.budget.levels)
+            return (
+                f"adaptive budget of {levels} tokens after block {self.prune_layer}, "
+                f"motion_weight {self.motion_weight}, policy {self.budget.version}{extra}"
+            )
         return (
             f"retention {self.retention:.0%} after block {self.prune_layer}, "
             f"motion_weight {self.motion_weight}{extra}"
         )
+
+
+class ClipBudget(NamedTuple):
+    """What the adaptive budget decided for each clip, in the order received.
+
+    Attributes:
+        tokens: ``[batch]``, tokens each clip kept after the cut.
+        regimes: ``[batch]``, the regime each clip fell in, from 0 upwards.
+        statistics: the redundancy and motion the decision was taken from.
+    """
+
+    tokens: torch.Tensor
+    regimes: torch.Tensor
+    statistics: ClipStatistics
 
 
 class PrunedEncoder(nn.Module):
@@ -152,21 +181,17 @@ class PrunedEncoder(nn.Module):
         Returns:
             ``[batch, embed_dim]``.
         """
-        self._validate_configuration()
-        self._check_eval()
-        tokens = self._tokenise(clips)
-        self._check_grid(tokens.shape[1])
+        return self._encode(clips)[0]
 
-        per_slice = self.geometry.tokens_per_slice
-        sizes = None
+    @torch.no_grad()
+    def encode_with_budget(self, clips: torch.Tensor) -> tuple[torch.Tensor, ClipBudget]:
+        """Produce the embeddings and the budget decided for each clip.
 
-        for index, block in enumerate(self.backbone.blocks):
-            tokens = self._run(block, tokens, sizes)
-
-            if self._should_prune(index):
-                tokens, sizes, per_slice = self._prune_and_merge(tokens, per_slice)
-
-        return self._pool(tokens, sizes)
+        Only an adaptive plan has a per-clip budget to report.
+        """
+        if self.plan.budget is None or not self.plan.prunes:
+            raise ValueError("only an adaptive plan decides a budget per clip; set plan.budget")
+        return self._encode(clips)
 
     def forward(self, clips: torch.Tensor) -> torch.Tensor:
         return self.encode(clips)
@@ -180,20 +205,27 @@ class PrunedEncoder(nn.Module):
         forty, so inspection costs a fraction of a full extraction.
 
         The decision is taken along the same path as :meth:`encode`, with the same
-        score and the same criterion. It is not an approximate reconstruction.
+        score and the same criterion. It is not an approximate reconstruction. Under an
+        adaptive budget, clips keeping fewer tokens than the widest one are padded with
+        position ``-1`` and size zero.
         """
         grid = self._grid_at_cut(clips)
+        keeps, _ = self._keeps(grid)
         scores = score_tokens(grid, self.plan.motion_weight, self.plan.spatial_prior)
-        keep = self.geometry.kept_per_slice(self.plan.retention)
 
-        ranking = scores.argsort(dim=-1, descending=True)
-        merged = merge_tokens(grid, initial_sizes(grid), scores, keep)
+        batch, slices, _ = scores.shape
+        widest = int(keeps.max())
+        kept = torch.full((batch, slices, widest), -1, dtype=torch.long, device=scores.device)
+        sizes = grid.new_zeros((batch, slices, widest))
+        for keep, members in self._groups(keeps):
+            part, part_scores = grid[members], scores[members]
+            ranking = part_scores.argsort(dim=-1, descending=True)
+            merged = merge_tokens(part, initial_sizes(part), part_scores, keep)
+            kept[members, :, :keep] = ranking[..., :keep].sort(dim=-1).values
+            sizes[members, :, :keep] = merged.sizes.squeeze(-1)
 
         return TokenSelection(
-            scores=scores,
-            kept=ranking[..., :keep].sort(dim=-1).values,
-            sizes=merged.sizes.squeeze(-1),
-            grid_size=self.geometry.grid_size,
+            scores=scores, kept=kept, sizes=sizes, grid_size=self.geometry.grid_size
         )
 
     @torch.no_grad()
@@ -206,6 +238,62 @@ class PrunedEncoder(nn.Module):
         return clip_statistics(self._grid_at_cut(clips))
 
     # -- internals ----------------------------------------------------------
+    def _encode(self, clips: torch.Tensor) -> tuple[torch.Tensor, ClipBudget | None]:
+        """The forward pass.
+
+        After the cut, clips are grouped by how many tokens they keep, and each group
+        runs the remaining blocks as its own batch: uniform within a group, so nothing
+        is padded. Embeddings come back in the order the clips arrived.
+        """
+        self._validate_configuration()
+        self._check_eval()
+        tokens = self._tokenise(clips)
+        self._check_grid(tokens.shape[1])
+
+        blocks = list(self.backbone.blocks)
+        cut = self.plan.prune_layer if self.plan.prunes else len(blocks)
+        for block in blocks[:cut]:
+            tokens = self._run(block, tokens, None)
+        if not self.plan.prunes:
+            return self._pool(tokens, None), None
+
+        grid = self._as_grid(tokens, self.geometry.tokens_per_slice)
+        keeps, budget = self._keeps(grid)
+        scores = score_tokens(grid, self.plan.motion_weight, self.plan.spatial_prior)
+
+        embeddings = None
+        for keep, members in self._groups(keeps):
+            part = grid[members]
+            merged = merge_tokens(part, initial_sizes(part), scores[members], keep)
+            count, slices, _, dim = merged.tokens.shape
+            group = merged.tokens.reshape(count, slices * keep, dim)
+            for block in blocks[cut:]:
+                group = self._run(block, group, merged.sizes)
+            pooled = self._pool(group, merged.sizes)
+            if embeddings is None:
+                embeddings = pooled.new_empty((clips.shape[0], pooled.shape[1]))
+            embeddings[members] = pooled
+        return embeddings, budget
+
+    def _keeps(self, grid: torch.Tensor) -> tuple[torch.Tensor, ClipBudget | None]:
+        """Tokens kept per slice by each clip, and the budget record when adaptive."""
+        slices = self.geometry.temporal_slices
+        budget = self.plan.budget
+        if budget is None:
+            keep = self.geometry.kept_per_slice(self.plan.retention)
+            return torch.full((grid.shape[0],), keep, dtype=torch.long, device=grid.device), None
+
+        statistics = clip_statistics(grid)
+        regimes = budget.regimes(statistics)
+        tokens = torch.tensor(budget.levels, device=regimes.device)[regimes]
+        return tokens // slices, ClipBudget(tokens, regimes, statistics)
+
+    @staticmethod
+    def _groups(keeps: torch.Tensor):
+        """Each distinct count, with the positions of the clips keeping it."""
+        for keep in keeps.unique().tolist():
+            yield keep, (keeps == keep).nonzero(as_tuple=True)[0]
+
     def _grid_at_cut(self, clips: torch.Tensor) -> torch.Tensor:
         """Run the blocks up to the pruning layer and return the token grid there."""
         self._validate_configuration()
@@ -219,10 +307,8 @@ class PrunedEncoder(nn.Module):
         tokens = self._tokenise(clips)
         self._check_grid(tokens.shape[1])
 
-        for index, block in enumerate(self.backbone.blocks):
+        for block in list(self.backbone.blocks)[: self.plan.prune_layer]:
             tokens = self._run(block, tokens, None)
-            if self._should_prune(index):
-                break
         return self._as_grid(tokens, self.geometry.tokens_per_slice)
 
     def _validate_configuration(self) -> None:
@@ -297,18 +383,6 @@ class PrunedEncoder(nn.Module):
             return block(tokens)
         log_sizes = torch.log(sizes.reshape(tokens.shape[0], -1).clamp(min=1e-6))
         return run_block(block, tokens, log_sizes)
-
-    def _should_prune(self, index: int) -> bool:
-        return self.plan.prunes and (index + 1) == self.plan.prune_layer
-
-    def _prune_and_merge(self, tokens: torch.Tensor, per_slice: int):
-        grid = self._as_grid(tokens, per_slice)
-        scores = score_tokens(grid, self.plan.motion_weight, self.plan.spatial_prior)
-        keep = self.geometry.kept_per_slice(self.plan.retention)
-        merged = merge_tokens(grid, initial_sizes(grid), scores, keep)
-
-        batch, slices, _, dim = merged.tokens.shape
-        return merged.tokens.reshape(batch, slices * keep, dim), merged.sizes, keep
 
     def _as_grid(self, tokens: torch.Tensor, per_slice: int) -> torch.Tensor:
         batch, _, dim = tokens.shape

@@ -56,6 +56,12 @@ def test_a_value_tied_with_every_reference_ranks_in_the_middle():
     assert policy.score(_stats([0.3], [0.0])).item() == pytest.approx(0.5)
 
 
+def test_ranks_interpolate_between_reference_values():
+    """Halfway between two reference values ranks halfway between their positions."""
+    policy = _policy(motion_balance=1.0)
+    assert policy.score(_stats([0.3, 0.3], [1.5, 4.5])).tolist() == pytest.approx([0.125, 0.875])
+
+
 def test_thresholds_cut_the_score_into_regimes():
     policy = _policy()
     stats = _stats([0.5, 0.3, 0.1], [1.0, 3.0, 5.0])
@@ -86,7 +92,7 @@ def test_levels_must_fit_the_grid():
 @pytest.mark.parametrize(
     "changes,message",
     [
-        ({"redundancy_reference": []}, "non-empty"),
+        ({"redundancy_reference": [0.5]}, "at least two"),
         ({"motion_reference": [1.0, float("nan")]}, "finite"),
         ({"motion_reference": [2.0, 1.0]}, "ascending"),
         ({"levels": [512], "thresholds": []}, "two levels"),

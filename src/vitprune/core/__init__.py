@@ -16,7 +16,7 @@ Typical use::
 """
 
 from vitprune.core.compat import CompatibilityReport, check_backbone
-from vitprune.core.encoder import PrunedEncoder, PruningPlan
+from vitprune.core.encoder import ClipBudget, PrunedEncoder, PruningPlan
 from vitprune.core.geometry import ClipGeometry
 from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import MergedTokens, initial_sizes, merge_tokens, size_weighted_mean
@@ -28,6 +28,7 @@ from vitprune.core.statistics import ClipStatistics, clip_statistics
 
 __all__ = [
     "BudgetPolicy",
+    "ClipBudget",
     "ClipGeometry",
     "ClipStatistics",
     "CompatibilityReport",
