@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, replace
 from itertools import pairwise
 from math import isfinite
 from numbers import Integral, Real
@@ -34,6 +35,9 @@ import torch
 
 from vitprune.core.geometry import ClipGeometry
 from vitprune.core.statistics import ClipStatistics
+
+#: Reference values kept per statistic: enough to rank against, few enough to read.
+REFERENCE_POINTS = 101
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,58 @@ class BudgetPolicy:
             key: list(value) if isinstance(value, tuple) else value
             for key, value in asdict(self).items()
         }
+
+
+def calibrate_policy(
+    statistics: ClipStatistics,
+    levels: Sequence[int],
+    motion_balance: float = 0.5,
+    reference_points: int = REFERENCE_POINTS,
+) -> BudgetPolicy:
+    """Fit a policy to the statistics of calibration clips.
+
+    The reference values are evenly spaced quantiles of the calibration statistics,
+    and the thresholds split the calibration clips into regimes of equal size. The
+    mean token count on those clips is therefore the mean of the levels: levels
+    symmetric around a target, such as 256, 512 and 768, hit that target.
+
+    Calibration clips must not come from the evaluation set, and the policy should be
+    frozen before evaluating; otherwise it is tuned on the data it is judged on.
+
+    Raises:
+        ValueError: when there are fewer clips than levels, or when they vary too
+            little to separate the regimes.
+    """
+    redundancy = statistics.redundancy.detach().double().cpu().flatten()
+    motion = statistics.motion.detach().double().cpu().flatten()
+    levels = tuple(levels)
+    if redundancy.numel() != motion.numel():
+        raise ValueError("redundancy and motion must describe the same clips")
+    if redundancy.numel() < len(levels):
+        raise ValueError(
+            f"calibration needs at least one clip per level, got {redundancy.numel()}"
+        )
+    if not (torch.isfinite(redundancy).all() and torch.isfinite(motion).all()):
+        raise ValueError("calibration statistics must be finite")
+    if isinstance(reference_points, bool) or not isinstance(reference_points, int):
+        raise ValueError("reference_points must be an integer")
+    if reference_points < 2:
+        raise ValueError("reference_points must be at least 2")
+
+    quantiles = torch.linspace(0.0, 1.0, reference_points, dtype=torch.float64)
+    split = torch.arange(1, len(levels), dtype=torch.float64) / len(levels)
+    draft = BudgetPolicy(
+        redundancy_reference=torch.quantile(redundancy, quantiles).tolist(),
+        motion_reference=torch.quantile(motion, quantiles).tolist(),
+        thresholds=split.tolist(),
+        levels=levels,
+        motion_balance=motion_balance,
+    )
+    g = draft.score(ClipStatistics(redundancy.float(), motion.float()))
+    thresholds = torch.quantile(g.double(), split).tolist()
+    if any(b <= a for a, b in pairwise(thresholds)):
+        raise ValueError("the calibration clips vary too little to separate the regimes")
+    return replace(draft, thresholds=thresholds)
 
 
 def _rank(values: torch.Tensor, reference: tuple[float, ...]) -> torch.Tensor:

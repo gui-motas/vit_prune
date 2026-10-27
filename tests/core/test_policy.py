@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vitprune.core.geometry import ClipGeometry
-from vitprune.core.policy import BudgetPolicy
+from vitprune.core.policy import BudgetPolicy, calibrate_policy
 from vitprune.core.statistics import ClipStatistics
 
 
@@ -122,3 +122,69 @@ def test_an_edited_policy_no_longer_matches_its_version():
     data["levels"] = [128, 512, 768]
     with pytest.raises(ValueError, match="version"):
         BudgetPolicy.from_dict(data)
+
+
+# ---------------------------------------------------------------------------
+# Calibration
+# ---------------------------------------------------------------------------
+def _calibration_clips(count=300, seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    return ClipStatistics(
+        torch.rand(count, generator=generator), torch.rand(count, generator=generator) * 6
+    )
+
+
+def test_calibration_hits_the_mean_of_the_levels():
+    """Symmetric levels around 512 give a mean of 512 on the calibration clips."""
+    clips = _calibration_clips()
+    policy = calibrate_policy(clips, levels=[256, 512, 768])
+    assert policy.tokens(clips).float().mean().item() == pytest.approx(512, abs=4)
+
+
+def test_calibration_splits_the_clips_into_equal_regimes():
+    clips = _calibration_clips()
+    counts = torch.bincount(calibrate_policy(clips, [256, 512, 768]).regimes(clips))
+    assert counts.tolist() == pytest.approx([100, 100, 100], abs=1)
+
+
+def test_calibration_is_deterministic():
+    clips = _calibration_clips()
+    first, second = (calibrate_policy(clips, [256, 512, 768]) for _ in range(2))
+    assert first == second
+    assert first.version == second.version
+
+
+def test_the_reference_spans_the_calibration_clips():
+    clips = _calibration_clips()
+    policy = calibrate_policy(clips, [256, 512, 768], reference_points=11)
+    assert len(policy.motion_reference) == 11
+    assert policy.motion_reference[0] == pytest.approx(clips.motion.min().item())
+    assert policy.motion_reference[-1] == pytest.approx(clips.motion.max().item())
+
+
+def test_calibration_keeps_the_motion_balance():
+    policy = calibrate_policy(_calibration_clips(), [256, 512, 768], motion_balance=0.8)
+    assert policy.motion_balance == 0.8
+
+
+def test_calibration_needs_a_clip_per_level():
+    with pytest.raises(ValueError, match="one clip per level"):
+        calibrate_policy(_calibration_clips(count=2), [256, 512, 768])
+
+
+def test_calibration_clips_must_vary():
+    still = ClipStatistics(torch.full((30,), 0.5), torch.zeros(30))
+    with pytest.raises(ValueError, match="vary too little"):
+        calibrate_policy(still, [256, 512, 768])
+
+
+@pytest.mark.parametrize(
+    "stats,message",
+    [
+        (ClipStatistics(torch.tensor([0.1, float("nan"), 0.3]), torch.ones(3)), "finite"),
+        (ClipStatistics(torch.rand(5), torch.rand(4)), "same clips"),
+    ],
+)
+def test_invalid_calibration_statistics_are_rejected(stats, message):
+    with pytest.raises(ValueError, match=message):
+        calibrate_policy(stats, [256, 512])

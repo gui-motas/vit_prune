@@ -28,7 +28,7 @@ The method. Installable and usable on its own.
 | `compat` | `check_backbone`: structure and behaviour verification before use |
 | `scoring` | uniqueness and motion, combined into the score that decides survival |
 | `statistics` | per-clip redundancy and motion, the inputs for deciding how many tokens a clip keeps |
-| `policy` | the adaptive budget: normalised statistics, regimes and tokens per clip |
+| `policy` | the adaptive budget: normalised statistics, regimes, tokens per clip, and its calibration |
 | `priors` | per-position multipliers encoding camera placement |
 | `merging` | token merging with size tracking, and the pooling that honours it |
 | `attention` | proportional attention through a rank-1 augmentation |

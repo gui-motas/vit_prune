@@ -20,7 +20,7 @@ from vitprune.core.encoder import PrunedEncoder, PruningPlan
 from vitprune.core.geometry import ClipGeometry
 from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import MergedTokens, initial_sizes, merge_tokens, size_weighted_mean
-from vitprune.core.policy import BudgetPolicy
+from vitprune.core.policy import BudgetPolicy, calibrate_policy
 from vitprune.core.priors import region_prior, top_rows_prior, uniform_prior
 from vitprune.core.protocols import VideoBackbone
 from vitprune.core.scoring import score_tokens
@@ -36,6 +36,7 @@ __all__ = [
     "PruningPlan",
     "TokenSelection",
     "VideoBackbone",
+    "calibrate_policy",
     "check_backbone",
     "clip_statistics",
     "initial_sizes",
