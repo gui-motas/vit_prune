@@ -36,6 +36,7 @@ from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import initial_sizes, merge_tokens, size_weighted_mean
 from vitprune.core.protocols import missing_attributes
 from vitprune.core.scoring import score_tokens
+from vitprune.core.statistics import ClipStatistics, clip_statistics
 
 
 @dataclass(frozen=True)
@@ -181,23 +182,7 @@ class PrunedEncoder(nn.Module):
         The decision is taken along the same path as :meth:`encode`, with the same
         score and the same criterion. It is not an approximate reconstruction.
         """
-        self._validate_configuration()
-        self._check_eval()
-        if not self.plan.prunes:
-            raise ValueError(
-                "a dense plan prunes nothing, so there is no selection to inspect. "
-                "Use a retention ratio below 1."
-            )
-
-        tokens = self._tokenise(clips)
-        self._check_grid(tokens.shape[1])
-
-        for index, block in enumerate(self.backbone.blocks):
-            tokens = self._run(block, tokens, None)
-            if self._should_prune(index):
-                break
-
-        grid = self._as_grid(tokens, self.geometry.tokens_per_slice)
+        grid = self._grid_at_cut(clips)
         scores = score_tokens(grid, self.plan.motion_weight, self.plan.spatial_prior)
         keep = self.geometry.kept_per_slice(self.plan.retention)
 
@@ -211,7 +196,35 @@ class PrunedEncoder(nn.Module):
             grid_size=self.geometry.grid_size,
         )
 
+    @torch.no_grad()
+    def statistics(self, clips: torch.Tensor) -> ClipStatistics:
+        """Measure each clip's redundancy and motion at the pruning layer.
+
+        Like :meth:`select`, only the blocks up to the cut run, and the statistics are
+        taken from the same grid the score sees, before any merge.
+        """
+        return clip_statistics(self._grid_at_cut(clips))
+
     # -- internals ----------------------------------------------------------
+    def _grid_at_cut(self, clips: torch.Tensor) -> torch.Tensor:
+        """Run the blocks up to the pruning layer and return the token grid there."""
+        self._validate_configuration()
+        self._check_eval()
+        if not self.plan.prunes:
+            raise ValueError(
+                "a dense plan prunes nothing, so there is no pruning layer to inspect. "
+                "Use a retention ratio below 1."
+            )
+
+        tokens = self._tokenise(clips)
+        self._check_grid(tokens.shape[1])
+
+        for index, block in enumerate(self.backbone.blocks):
+            tokens = self._run(block, tokens, None)
+            if self._should_prune(index):
+                break
+        return self._as_grid(tokens, self.geometry.tokens_per_slice)
+
     def _validate_configuration(self) -> None:
         missing = missing_attributes(self.backbone)
         if missing:

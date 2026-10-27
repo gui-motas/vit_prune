@@ -23,9 +23,11 @@ from vitprune.core.merging import MergedTokens, initial_sizes, merge_tokens, siz
 from vitprune.core.priors import region_prior, top_rows_prior, uniform_prior
 from vitprune.core.protocols import VideoBackbone
 from vitprune.core.scoring import score_tokens
+from vitprune.core.statistics import ClipStatistics, clip_statistics
 
 __all__ = [
     "ClipGeometry",
+    "ClipStatistics",
     "CompatibilityReport",
     "MergedTokens",
     "PrunedEncoder",
@@ -33,6 +35,7 @@ __all__ = [
     "TokenSelection",
     "VideoBackbone",
     "check_backbone",
+    "clip_statistics",
     "initial_sizes",
     "merge_tokens",
     "region_prior",

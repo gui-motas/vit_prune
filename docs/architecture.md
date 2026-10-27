@@ -27,6 +27,7 @@ The method. Installable and usable on its own.
 | `protocols` | the backbone contract, as a Protocol a type checker can verify |
 | `compat` | `check_backbone`: structure and behaviour verification before use |
 | `scoring` | uniqueness and motion, combined into the score that decides survival |
+| `statistics` | per-clip redundancy and motion, the inputs for deciding how many tokens a clip keeps |
 | `priors` | per-position multipliers encoding camera placement |
 | `merging` | token merging with size tracking, and the pooling that honours it |
 | `attention` | proportional attention through a rank-1 augmentation |
@@ -43,6 +44,11 @@ dozens of lines later. Here it fails at construction with the reason stated.
 **`priors` is separate from `scoring`.** Uniqueness and motion are properties of the
 content; a spatial prior is knowledge about where the camera was installed. Merging
 them would make an installation detail look like part of the method.
+
+**`statistics` is separate from `scoring`.** The score ranks tokens within a clip and
+is normalised per slice; the statistics describe whole clips and must keep the
+differences between them. Normalising them the same way would erase exactly what a
+per-clip budget has to see.
 
 **`size_weighted_mean` lives in `merging`, not `encoder`.** It is the operation that
 honours the sizes produced there. Plain mean pooling in its place would undo
