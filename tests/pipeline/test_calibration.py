@@ -2,6 +2,7 @@
 that policy under conditions its statistics were not measured in."""
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -17,7 +18,9 @@ LEVELS = [16, 32, 48]
 
 
 def _frames(path):
-    rng = np.random.default_rng(sum(map(ord, str(path))))
+    # Seeded by the file name, not the full path: pytest numbers its temporary folders
+    # per session, and some seeds give clips too alike to separate three regimes.
+    rng = np.random.default_rng(sum(map(ord, Path(path).name)))
     return rng.integers(0, 256, size=(48, 40, 40, 3), dtype=np.uint8)
 
 
