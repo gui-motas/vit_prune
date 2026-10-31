@@ -40,7 +40,9 @@ def score_tokens(
         motion_weight: between 0 and 1, the weight of motion against uniqueness.
         spatial_prior: optional per-position multiplier shaped
             ``[tokens_per_slice]``, used to discourage regions of the frame that are
-            salient but uninformative. See :mod:`vitprune.core.priors`.
+            salient but uninformative. See :mod:`vitprune.core.priors`. A weight of
+            zero ranks the position after every other one, still in order of its own
+            score, which leaves its score negative.
 
     Returns:
         Scores shaped ``[batch, temporal_slices, tokens_per_slice]``. Higher means
@@ -132,4 +134,8 @@ def _apply_prior(score: torch.Tensor, prior: torch.Tensor) -> torch.Tensor:
         raise ValueError(
             f"the spatial prior has {prior.numel()} positions but a slice holds {tokens} tokens"
         )
-    return score * prior.view(1, 1, -1).to(score.device, score.dtype)
+    weights = prior.view(1, 1, -1).to(score.device, score.dtype)
+    # Scores never exceed 1 + EPSILON, so subtracting 2 puts zero-weight positions below
+    # every weighted one without tying them: a plain product would leave their order to
+    # the sort.
+    return torch.where(weights > 0, score * weights, score - 2.0)

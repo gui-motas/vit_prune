@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from vitprune.core.priors import top_rows_prior
+from vitprune.core.priors import box_prior, top_rows_prior
 from vitprune.core.scoring import score_tokens
 
 
@@ -61,14 +61,17 @@ def test_uniqueness_favours_the_odd_token_out():
     assert scores.argmax().item() == 3
 
 
-def test_the_spatial_prior_zeroes_the_marked_positions():
+def test_zero_weight_positions_rank_last_in_their_own_order():
+    """A zero weight sends the position behind every weighted one; among themselves
+    the positions keep the order of their own score instead of tying at zero."""
     t = _tokens(batch=1, slices=2, count=16)
     prior = top_rows_prior(grid_size=4, rows=1, weight=0.0)
 
-    without = score_tokens(t, spatial_prior=None)
-    with_prior = score_tokens(t, spatial_prior=prior)
+    without = score_tokens(t, motion_weight=0.0)
+    with_prior = score_tokens(t, motion_weight=0.0, spatial_prior=prior)
 
-    assert torch.all(with_prior[..., :4] == 0.0)
+    assert with_prior[..., :4].max() < with_prior[..., 4:].min()
+    assert torch.equal(with_prior[..., :4].argsort(dim=-1), without[..., :4].argsort(dim=-1))
     assert torch.allclose(with_prior[..., 4:], without[..., 4:])
 
 
@@ -104,3 +107,30 @@ def test_top_rows_prior_lowers_only_the_top():
 def test_invalid_prior_parameters_are_rejected(rows, weight):
     with pytest.raises(ValueError):
         top_rows_prior(grid_size=4, rows=rows, weight=weight)
+
+
+def test_box_prior_marks_every_cell_a_box_touches():
+    """A box grazing a cell takes all of it; a box ending on a boundary does not
+    spill into the next cell."""
+    prior = box_prior(grid_size=4, boxes=[(0.30, 0.0, 0.50, 0.26)]).reshape(4, 4)
+    assert prior.tolist() == [
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+    ]
+
+
+def test_box_prior_joins_the_boxes():
+    prior = box_prior(grid_size=4, boxes=[(0.0, 0.0, 0.25, 0.25), (0.75, 0.75, 1.0, 1.0)])
+    assert prior.nonzero().flatten().tolist() == [0, 15]
+
+
+def test_box_prior_without_boxes_marks_nothing():
+    assert torch.all(box_prior(grid_size=4, boxes=[]) == 0.0)
+
+
+@pytest.mark.parametrize("box", [(0.5, 0.0, 0.5, 1.0), (0.0, 0.0, 1.2, 1.0), (-0.1, 0.0, 1.0, 1.0)])
+def test_box_prior_rejects_boxes_outside_the_frame_or_empty(box):
+    with pytest.raises(ValueError, match="box"):
+        box_prior(grid_size=4, boxes=[box])

@@ -113,6 +113,8 @@ class PruningPlan:
         if not self.prunes:
             return "no pruning (dense baseline)"
         extra = ", size-biased attention" if self.size_biased_attention else ""
+        if self.spatial_prior is not None:
+            extra += ", spatial prior"
         levels = "/".join(str(level) for level in self.budget.levels)
         return (
             f"adaptive budget of {levels} tokens after block {self.prune_layer}, "

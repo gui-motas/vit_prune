@@ -54,7 +54,9 @@ gives a clip's own count.
 - `prune_layer` is an integer from `0` to the actual depth; `0` disables pruning, and
   a budget with `prune_layer` 0 is rejected.
 - `motion_weight` is in `[0,1]`; NaN/Inf are rejected.
-- Prior: one-dimensional finite non-negative tensor with `tokens_per_slice` values.
+- Prior: one-dimensional finite non-negative tensor with `tokens_per_slice` values. A
+  zero weight ranks the position after every weighted one, still in order of its own
+  score; its score comes out negative.
 - Budget: a `BudgetPolicy` whose levels are multiples of the temporal slices and at
   most the grid's token count; its statistics must be finite.
 - Invalid plans are rejected at construction/binding and rechecked before execution.
