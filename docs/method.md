@@ -163,6 +163,17 @@ being correctly ignored.
 A prior encodes where the camera was installed, not a property of the method. Use
 `TokenSelection` to look at a real frame first.
 
+**The driver region takes the band from data instead.** `vitprune region` runs a COCO
+person detector (YOLO26s, with the rule of the AI City preprocessing: person above
+0.5, largest box) on the middle frame of every calibration clip and joins the boxes on
+the grid.
+Positions inside get weight 1, the rest 0: the slots of each slice go first to the
+region, by score, and outside tokens only take what is left, still merging into kept
+ones. The budget statistics stay on the whole grid, so the region changes which tokens
+a clip keeps, never how many. Whether that helps is the experiment in
+[experiments](experiments.md#validating-the-driver-region): every outside token merges
+into a token of the region, even when nothing there resembles it.
+
 ## 8. Proportional attention
 
 A kept token standing for twelve should arguably be attended to twelve times as

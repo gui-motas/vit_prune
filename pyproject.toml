@@ -22,6 +22,10 @@ pipeline = [
     "opencv-python>=4.8",
     "PyYAML>=6.0",
 ]
+# The person detector of `vitprune region`.
+region = [
+    "ultralytics>=8.4",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

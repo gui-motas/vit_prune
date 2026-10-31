@@ -1,8 +1,9 @@
 # Pipeline operation
 
 Install the local checkout with `pip install -e ".[pipeline,dev]"`. Base dependencies
-are NumPy and Torch; `pipeline` adds OpenCV, which decodes every video, and PyYAML.
-The old `torch` extra no longer exists.
+are NumPy and Torch; `pipeline` adds OpenCV, which decodes every video, and PyYAML;
+`region` adds Ultralytics for the person detector. The old `torch` extra no longer
+exists.
 
 ## Commands
 
@@ -10,6 +11,7 @@ The old `torch` extra no longer exists.
 vitprune cost --policy policy.json --save results/cost.json
 vitprune check --weights w.pth --model-source /path/to/videomae
 vitprune calibrate --videos calibration/ --weights w.pth --model-source /path/to/videomae --levels 256 512 768 --out policy.json
+vitprune region --videos calibration/ --detector yolo26s.pt --out region.json
 vitprune latency --weights w.pth --model-source /path/to/videomae --policy policy.json --videos data/ --precision bf16 --save results/latency.json
 vitprune drift --videos data/ --weights w.pth --model-source /path/to/videomae --policy policy.json --clips 200 --save results/drift.json
 vitprune run --video clip.mp4 --weights w.pth --model-source /path/to/videomae --policy policy.json --out outputs/clip --compare
@@ -33,6 +35,15 @@ extraction.
 since the budget depends on the content; `drift` compares them on `--clips` clips.
 Both spread their clips evenly over every video in `--videos`.
 
+`region` runs a COCO person detector on the middle frame of every calibration clip, with
+the rule of the AI City preprocessing, and writes the grid positions the driver
+occupied. `--detector` takes the weights of any detector Ultralytics loads, such as
+`yolo26s.pt`; it needs the `region` extra, not the VideoMAE source. `--device` takes
+`cuda`, `cuda:N` or `cpu`; `--clips-per-video` works as in `calibrate`.
+`--region region.json` then applies it in `drift`, `run` and `extract`; it requires
+`--policy` and excludes `--prior-top-rows`. A region file is never overwritten and is
+refused for a backbone with another grid.
+
 `check`, `latency`, `drift`, `run` and `extract` support `--device cpu` and require
 an external Giant backbone exposing `forward_features`. All verify dense equivalence
 before application. The startup probe is outside benchmark timing.
@@ -45,6 +56,8 @@ No command here recognises actions directly: `evaluate` invokes the external mod
 
 - `calibrate`: the policy file, with the policy, its version and the calibration
   videos, clip count, cut, sampling and checkpoint identity.
+- `region`: the region file, with the grid, the region and, per calibration video,
+  how many clips found the driver, plus the detection rule and the detector weights.
 - `run`: `VIDEO.npz`, `report.json`, `manifest.json`.
 - `extract`: one `VIDEO.npz` per video and `manifest.json`. With a policy, the
   manifest records the policy and, per video, each clip's tokens, regime, redundancy

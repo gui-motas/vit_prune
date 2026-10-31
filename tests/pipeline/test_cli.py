@@ -74,7 +74,8 @@ def test_the_version_is_reported(capsys):
 
 
 @pytest.mark.parametrize(
-    "command", ["check", "calibrate", "cost", "latency", "drift", "run", "extract", "evaluate"]
+    "command",
+    ["check", "calibrate", "region", "cost", "latency", "drift", "run", "extract", "evaluate"],
 )
 def test_every_command_has_help(command, capsys):
     with pytest.raises(SystemExit):

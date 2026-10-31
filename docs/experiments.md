@@ -125,6 +125,44 @@ print(selection.kept_in(0), selection.rows_share(clip=0, slice_index=0, rows=4))
 
 Cheap: only the blocks up to the pruning layer run.
 
+## Validating the driver region
+
+The question: does filling the slots from the driver region first keep more of what
+the downstream model needs than the score alone? Answer it on the validation split,
+before the final contrast, and keep the decision fixed afterwards.
+
+```bash
+vitprune region --videos data/calibration --detector yolo26s.pt --out region.json
+
+vitprune drift ... --policy policy.json --clips 200 --save results/drift.json
+vitprune drift ... --policy policy.json --region region.json --clips 200 \
+    --save results/drift-region.json
+
+vitprune extract ... --policy policy.json --out features/adaptive
+vitprune extract ... --policy policy.json --region region.json --out features/adaptive-region
+vitprune evaluate --features features/adaptive ... --out runs/adaptive
+vitprune evaluate --features features/adaptive-region ... --out runs/adaptive-region
+```
+
+Build the region on the calibration videos of the policy, and look at the drawn map
+and the detection rate before going on. A region covering nearly the whole frame has
+nothing to exclude; a rate well below 100% means the detector misses the driver with
+this camera. On the AI City dashboard footage, YOLO26n scored drivers half hidden by
+the wheel or in a hood below 0.5 and an empty passenger seat above it, which put the
+seat in the region; YOLO26s found the driver in all 27 frames checked.
+
+The region leaves the budget alone: both manifests record the same tokens per clip, so
+the cost is equal and any difference comes from which tokens were kept.
+
+| Drift | Downstream | Reading |
+|---|---|---|
+| closer to dense | equal or better | the region helps; keep it |
+| further from dense | better | it trades fidelity for the driver; the per-class results decide |
+| further from dense | worse | outside tokens merged into the region distort it; drop it |
+
+Read the downstream result per class. Actions that depend on the surroundings, such as
+talking to a passenger or reaching behind, are where the region can lose.
+
 ## Reporting
 
 **Report the contrast with the counts actually kept.** The mean token count of the

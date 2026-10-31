@@ -5,6 +5,7 @@ Commands for integration, measurement and application:
 * ``cost`` -- count operations. No GPU, checkpoint or video needed.
 * ``check`` -- verify the dense encoder against the original forward.
 * ``calibrate`` -- fit the adaptive budget on calibration videos.
+* ``region`` -- find the driver region with a person detector, on calibration videos.
 * ``latency`` -- time the adaptive budget against the dense path, on real clips.
 * ``drift`` -- measure how far the adaptive embedding moves. Needs video, no labels.
 * ``run`` -- run on one video and report what came out.
@@ -369,6 +370,35 @@ def _run_calibrate(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# region
+# ---------------------------------------------------------------------------
+def _run_region(args) -> int:
+    import torch
+
+    from vitprune.pipeline.region import calibrate_region, load_yolo, render_region, write_region
+
+    if Path(args.out).exists():
+        raise FileExistsError(f"refusing to overwrite the region at {args.out}")
+    geometry = ClipGeometry.videomae_giant()
+    detector, record = load_yolo(args.detector, args.device)
+
+    print(RULE)
+    print("finding the driver in the middle frame of each clip")
+    print("calibration videos must not be part of the evaluation")
+    print(RULE)
+
+    content = calibrate_region(
+        args.videos, detector, geometry, args.stride, args.frame_step, args.clips_per_video, record
+    )
+    path = write_region(args.out, content)
+    calibration = content["calibration"]
+    print(f"\ndriver found in {calibration['detected']} of {calibration['clips']} clips")
+    print(f"region: {calibration['area']:.0%} of the frame, written to {path}\n")
+    print(render_region(torch.tensor(content["region"]["prior"]), geometry.grid_size))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # evaluate
 # ---------------------------------------------------------------------------
 def _run_evaluate(args) -> int:
@@ -437,6 +467,7 @@ def _plan_from(args, geometry: ClipGeometry):
     if not args.policy:
         options = {
             "--prior-top-rows": args.prior_top_rows,
+            "--region": args.region,
             "--motion-weight": args.motion_weight is not None,
             "--size-biased-attention": args.size_biased_attention,
         }
@@ -444,13 +475,19 @@ def _plan_from(args, geometry: ClipGeometry):
         if given:
             raise ValueError(f"{', '.join(given)} only shape what a policy prunes; pass --policy")
         return PruningPlan.dense()
+    if args.region and args.prior_top_rows:
+        raise ValueError("choose either --region or --prior-top-rows, not both")
+    prior = None
+    if args.region:
+        from vitprune.pipeline.region import read_region
+
+        prior = read_region(args.region, geometry)
+    elif args.prior_top_rows:
+        prior = top_rows_prior(geometry.grid_size, args.prior_top_rows, args.prior_weight)
     plan = PruningPlan(
         prune_layer=args.prune_layer,
         motion_weight=0.5 if args.motion_weight is None else args.motion_weight,
-        spatial_prior=(
-            top_rows_prior(geometry.grid_size, args.prior_top_rows, args.prior_weight)
-            if args.prior_top_rows else None
-        ),
+        spatial_prior=prior,
         size_biased_attention=args.size_biased_attention,
         budget=read_policy(args.policy, args.prune_layer, args.frame_step, args.weights),
     )
@@ -512,6 +549,10 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--prior-weight", type=float, default=0.15)
     parser.add_argument(
+        "--region",
+        help="driver region written by 'vitprune region'; slots are filled from inside it first",
+    )
+    parser.add_argument(
         "--size-biased-attention",
         action="store_true",
         help="experimental: weight attention by merged token size",
@@ -553,6 +594,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="clips taken from each video, spread over it (default: every clip)",
     )
     calibrate.set_defaults(handler=_run_calibrate)
+
+    region = commands.add_parser("region", help="find the driver region with a person detector")
+    region.add_argument("--videos", required=True, help="calibration videos, not evaluated")
+    region.add_argument(
+        "--detector", required=True,
+        help="weights of a COCO detector Ultralytics loads, such as yolo26s.pt",
+    )
+    region.add_argument("--out", required=True, help="region file to write")
+    region.add_argument("--stride", type=int, default=16)
+    region.add_argument("--frame-step", type=int, default=2)
+    region.add_argument(
+        "--clips-per-video", type=int,
+        help="clips taken from each video, spread over it (default: every clip)",
+    )
+    region.add_argument("--device", default="cuda", help="where the detector runs (default: cuda)")
+    region.set_defaults(handler=_run_region)
 
     cost = commands.add_parser("cost", help="estimate cost; needs no GPU or checkpoint")
     cost.add_argument(
