@@ -85,9 +85,9 @@ def ama_detections() -> dict[str, pd.DataFrame] | None:
     paths = {variant: RESULTS / "ama" / variant / "predictions.csv" for variant in VARIANTS}
     if not all(path.exists() for path in paths.values()):
         return None
-    ids = sorted(class_names())
-    # The AMA evaluator renumbers the classes by the annotated label ids, which leaves
-    # them unchanged only when every class is annotated.
+    ids = sorted({s["label_id"] for video in videos() for s in segments(video.stem)})
+    # The AMA evaluator renumbers the classes by the label ids annotated in the evaluated
+    # videos, which leaves them unchanged only when every class is annotated there.
     if ids != list(range(len(ids))):
         raise ValueError(f"the annotations hold classes {ids}; the AMA's labels cannot be read")
     return {variant: pd.read_csv(path) for variant, path in paths.items()}

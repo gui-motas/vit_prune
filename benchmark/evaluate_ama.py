@@ -5,7 +5,8 @@ of the AMA project: its ``eval.py`` runs under the same interpreter, with this f
 on its path ahead of the installed packages, so that ``nms_1d_cpu.py`` stands in for
 the compiled extension on every machine. Writes, under ``results``:
 
-* ``ama/labels.json`` -- the annotations with the ``subset`` field the AMA loader needs;
+* ``ama/labels.json`` -- the annotations of the evaluated videos, with the ``subset``
+  field the AMA loader needs;
 * ``ama/<variant>/`` -- the prepared configuration, the predictions and the AMA log;
 * ``ama.json`` -- mAP per tIoU and its average, per variant.
 
@@ -35,7 +36,13 @@ AVERAGE = re.compile(r"Average Map is :\s*([\d.]+|nan) %")
 
 
 def labels() -> Path:
+    """The annotations of the evaluated videos only. The AMA skips a video with no
+    features, but its scorer would still count that video's actions as missed."""
     database = annotations()
+    database["database"] = {
+        stem: video for stem, video in database["database"].items()
+        if stem in SETTINGS["evaluate"]
+    }
     for video in database["database"].values():
         video["subset"] = "validation"
     path = RESULTS / "ama" / "labels.json"
