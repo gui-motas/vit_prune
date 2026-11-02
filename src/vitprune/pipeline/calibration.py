@@ -124,9 +124,13 @@ def write_policy(path: str | Path, content: dict[str, Any]) -> Path:
 
 
 def read_policy(
-    path: str | Path, prune_layer: int, frame_step: int | None = None
+    path: str | Path,
+    prune_layer: int,
+    frame_step: int | None = None,
+    weights: str | Path | None = None,
 ) -> BudgetPolicy:
-    """Read a policy file and check it was calibrated for the same cut and sampling."""
+    """Read a policy file and check it was calibrated for the same cut, sampling and,
+    when ``weights`` is given, the same checkpoint."""
     content = json.loads(Path(path).read_text(encoding="utf-8"))
     policy = BudgetPolicy.from_dict(content["policy"])
     calibration = content.get("calibration", {})
@@ -138,4 +142,10 @@ def read_policy(
                 f"the policy was calibrated with {name} {recorded} but is used with {value}; "
                 "its statistics are not comparable. Calibrate again for this setting."
             )
+    recorded = (calibration.get("weights") or {}).get("sha256")
+    if weights is not None and recorded and recorded != SourceFile.of(weights).sha256:
+        raise ValueError(
+            "the policy was calibrated on another checkpoint; its statistics are on another "
+            "scale. Calibrate again with these weights."
+        )
     return policy

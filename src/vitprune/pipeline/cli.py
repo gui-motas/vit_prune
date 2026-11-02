@@ -122,7 +122,7 @@ def _run_latency(args) -> int:
     plan = PruningPlan(
         prune_layer=args.prune_layer,
         size_biased_attention=args.size_biased_attention,
-        budget=read_policy(args.policy, args.prune_layer, args.frame_step),
+        budget=read_policy(args.policy, args.prune_layer, args.frame_step, args.weights),
     )
     backbone = _load_backbone(args)
     print(RULE)
@@ -452,7 +452,7 @@ def _plan_from(args, geometry: ClipGeometry):
             if args.prior_top_rows else None
         ),
         size_biased_attention=args.size_biased_attention,
-        budget=read_policy(args.policy, args.prune_layer, args.frame_step),
+        budget=read_policy(args.policy, args.prune_layer, args.frame_step, args.weights),
     )
     plan.validate_for(geometry)
     return plan

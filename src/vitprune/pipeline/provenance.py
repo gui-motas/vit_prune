@@ -6,7 +6,7 @@ high: a different library version, a parameter changed without being noted, a
 checkpoint that was replaced.
 
 Each extraction writes, next to its results, a record of what was in force: the
-parameters, the checkpoint identified by size and modification time rather than by
+parameters, the checkpoint identified by the SHA-256 of its content rather than by
 name, the library versions and the machine.
 
 That is what allows answering, months later, whether two numbers are comparable

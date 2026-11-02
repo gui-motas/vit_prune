@@ -92,6 +92,18 @@ def test_an_edited_policy_file_is_refused(encoder, videos, tmp_path):
         read_policy(path, prune_layer=1)
 
 
+def test_a_policy_is_refused_with_another_checkpoint(encoder, videos, tmp_path):
+    """Statistics measured through one fine-tune sit on another scale for the next."""
+    used, other = tmp_path / "used.pth", tmp_path / "other.pth"
+    used.write_bytes(b"weights calibrated on")
+    other.write_bytes(b"weights fine-tuned again")
+    path = write_policy(tmp_path / "policy.json", _calibrate(encoder, videos, weights_path=used))
+
+    assert read_policy(path, prune_layer=1, weights=used).levels == tuple(LEVELS)
+    with pytest.raises(ValueError, match="another checkpoint"):
+        read_policy(path, prune_layer=1, weights=other)
+
+
 # ---------------------------------------------------------------------------
 # Through the command line
 # ---------------------------------------------------------------------------
