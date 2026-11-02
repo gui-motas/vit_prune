@@ -12,6 +12,7 @@ anything downstream, which is the premise of the whole experiment.
 
 from __future__ import annotations
 
+import json
 import time
 from collections import Counter
 from collections.abc import Iterable
@@ -24,11 +25,13 @@ import torch
 from vitprune.bench.cost import as_dict, budget_cost
 from vitprune.bench.latency import PRECISIONS, autocast
 from vitprune.core.encoder import PrunedEncoder
-from vitprune.pipeline.provenance import Manifest, SourceFile
+from vitprune.pipeline.provenance import MANIFEST_NAME, Manifest, SourceFile
 from vitprune.pipeline.video import find_videos, iter_clips
 
 #: Field name inside the compressed file. Downstream readers look for exactly this.
 FEATURE_KEY = "feats"
+#: The record of an extraction still under way, replaced by the manifest at the end.
+PARTIAL_NAME = "manifest.partial.json"
 
 
 def extract_folder(
@@ -62,6 +65,10 @@ def extract_folder(
 
     Returns:
         The path of the written record.
+
+    The record of the videos done so far is kept in ``manifest.partial.json``. Run the
+    same extraction again after an interruption and it carries on from there; the
+    finished ``manifest.json`` is written only once every video is done.
     """
     found = find_videos(videos)
     if not found:
@@ -73,59 +80,71 @@ def extract_folder(
     _validate_encoding(batch, precision)
 
     destination = Path(destination)
-    existing = [p for p in (destination / f"{video.stem}.npz" for video in found) if p.exists()]
-    if existing or (destination / "manifest.json").exists():
-        raise FileExistsError(f"destination already contains extraction outputs: {destination}")
+    settings = extraction_settings(
+        encoder, stride, frame_step, batch, device, precision, model_source
+    )
+    weights = SourceFile.of(weights_path) if weights_path else None
+    per_video = _resumable(destination, found, settings, weights)
     destination.mkdir(parents=True, exist_ok=True)
 
-    started = time.time()
-    per_video: dict[str, dict] = {}
-    total_clips = 0
-    tokens: list[int] = []
-
     for position, video in enumerate(found, start=1):
+        target = destination / f"{video.stem}.npz"
+        if video.stem in per_video and target.exists():
+            progress(f"[{position}/{len(found)}] {video.name}: done before")
+            continue
         moment = time.time()
         clips = (clip for _, clip in iter_clips(video, encoder.geometry, stride, frame_step))
         embeddings, budget = encode_clips(encoder, clips, batch, device, precision)
-        np.savez(destination / f"{video.stem}.npz", **{FEATURE_KEY: embeddings})
+        np.savez(target, **{FEATURE_KEY: embeddings})
 
         elapsed = time.time() - moment
         per_video[video.stem] = {
             "path": str(video),
             "source": asdict(SourceFile.of(video)),
-            "feature_file": asdict(SourceFile.of(destination / f"{video.stem}.npz")),
+            "feature_file": asdict(SourceFile.of(target)),
             "clips": int(embeddings.shape[0]),
             "embed_dim": int(embeddings.shape[1]),
             "seconds": round(elapsed, 2),
         }
         if budget is not None:
             per_video[video.stem]["budget"] = budget
-            tokens.extend(budget["tokens"])
-        total_clips += int(embeddings.shape[0])
+        _build_manifest(encoder, settings, weights, per_video).write(destination, PARTIAL_NAME)
         progress(f"[{position}/{len(found)}] {video.name}: {embeddings.shape} in {elapsed:.1f}s")
 
-    total_seconds = time.time() - started
-    manifest = _build_manifest(
-        encoder,
-        found,
-        per_video,
-        total_clips,
-        total_seconds,
-        stride,
-        frame_step,
-        batch,
-        device,
-        precision,
-        weights_path,
-        model_source,
-        tokens,
-    )
+    manifest = _build_manifest(encoder, settings, weights, per_video)
     written = manifest.write(destination)
+    (destination / PARTIAL_NAME).unlink(missing_ok=True)
+    statistics = manifest.statistics
     progress(
-        f"[done] {total_clips} clips from {len(found)} videos in {total_seconds:.1f}s "
-        f"-> {destination}"
+        f"[done] {statistics['clips']} clips from {len(found)} videos in "
+        f"{statistics['seconds']:.1f}s -> {destination}"
     )
     return written
+
+
+def _resumable(destination: Path, found, settings: dict, weights) -> dict[str, dict]:
+    """The videos an interrupted run of this same extraction already finished.
+
+    Refuses a folder holding a finished extraction, an unfinished one with other
+    settings or checkpoint, or features no record accounts for.
+    """
+    if (destination / MANIFEST_NAME).exists():
+        raise FileExistsError(f"destination already holds a finished extraction: {destination}")
+    partial = destination / PARTIAL_NAME
+    if partial.exists():
+        before = json.loads(partial.read_text(encoding="utf-8"))
+        same_weights = (before.get("weights") or {}).get("sha256") == (
+            weights.sha256 if weights else None
+        )
+        if before["settings"] != json.loads(json.dumps(settings)) or not same_weights:
+            raise FileExistsError(
+                f"{destination} holds an unfinished extraction with other settings or "
+                "another checkpoint; use another folder"
+            )
+        return before["outputs"]
+    if any((destination / f"{video.stem}.npz").exists() for video in found):
+        raise FileExistsError(f"destination already contains extraction outputs: {destination}")
+    return {}
 
 
 @torch.no_grad()
@@ -188,40 +207,26 @@ def _batches(clips, size: int):
         yield torch.stack(pending)
 
 
-def _build_manifest(
-    encoder,
-    found,
-    per_video,
-    total_clips,
-    total_seconds,
-    stride,
-    frame_step,
-    batch,
-    device,
-    precision,
-    weights_path,
-    model_source=None,
-    tokens=None,
-) -> Manifest:
-    geometry = encoder.geometry
-    plan = encoder.plan
+def _build_manifest(encoder, settings, weights, per_video) -> Manifest:
+    geometry, plan = encoder.geometry, encoder.plan
+    tokens = [t for entry in per_video.values() for t in entry.get("budget", {}).get("tokens", [])]
     cost = (
         budget_cost(geometry, tokens, plan.prune_layer)
         if tokens
         else budget_cost(geometry, [geometry.num_tokens], 0)
     )
+    clips = sum(entry["clips"] for entry in per_video.values())
+    seconds = sum(entry["seconds"] for entry in per_video.values())
     return Manifest(
-        settings=extraction_settings(
-            encoder, stride, frame_step, batch, device, precision, model_source
-        ),
-        weights=SourceFile.of(weights_path) if weights_path else None,
+        settings=settings,
+        weights=weights,
         cost=as_dict(cost),
         outputs=per_video,
         statistics={
-            "videos": len(found),
-            "clips": total_clips,
-            "seconds": round(total_seconds, 1),
-            "clips_per_second": round(total_clips / max(total_seconds, 1e-9), 2),
+            "videos": len(per_video),
+            "clips": clips,
+            "seconds": round(seconds, 1),
+            "clips_per_second": round(clips / max(seconds, 1e-9), 2),
         },
     )
 

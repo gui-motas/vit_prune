@@ -54,8 +54,10 @@ No command here recognises actions directly: `evaluate` invokes the external mod
   where applicable.
 
 Extraction refuses duplicate stems (including case-only duplicates) and existing
-target features/manifests. Use distinct output folders per protocol. A failed run
-can leave partial files; there is no automatic resume or transactional rollback.
+target features/manifests. Use distinct output folders per protocol. An interrupted
+run keeps `manifest.partial.json`: the same command run again skips the videos it
+lists and carries on, and refuses if the settings or the checkpoint changed. The
+finished `manifest.json` appears only when every video is done.
 
 Manifest schema 2 records full geometry, actual prior values, requested and effective
 autocast precision, backbone class, package-source fingerprint, package versions,

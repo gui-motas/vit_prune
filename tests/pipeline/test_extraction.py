@@ -80,6 +80,53 @@ def test_existing_features_are_not_silently_overwritten(tmp_path, encoder):
     assert existing.read_bytes() == b"user data"
 
 
+def _interrupted(tmp_path, monkeypatch, encoder):
+    """Two videos; reading b.mp4 fails the first time, as a crash would."""
+    for name in ("a.mp4", "b.mp4"):
+        (tmp_path / name).write_bytes(name.encode())
+    frames, reads = np.zeros((32, 32, 32, 3), dtype=np.uint8), []
+
+    def read(path, start=0):
+        reads.append(path.name)
+        if reads == ["a.mp4", "b.mp4"]:
+            raise RuntimeError("the disk went away")
+        return iter(frames[start:])
+
+    monkeypatch.setattr(reader, "read_frames", read)
+    out = tmp_path / "features"
+    with pytest.raises(RuntimeError, match="disk"):
+        _extract(encoder, tmp_path, out)
+    return out, reads
+
+
+def _extract(encoder, videos, out, **options):
+    return extraction.extract_folder(
+        encoder, videos, out, batch=2, device="cpu", precision="off",
+        progress=lambda _: None, **options,
+    )
+
+
+def test_an_interrupted_extraction_carries_on_where_it_stopped(tmp_path, monkeypatch, encoder):
+    out, reads = _interrupted(tmp_path, monkeypatch, encoder)
+    assert (out / "manifest.partial.json").exists()
+    assert not (out / "manifest.json").exists(), "an unfinished run must not look finished"
+
+    record = json.loads(_extract(encoder, tmp_path, out).read_text(encoding="utf-8"))
+
+    assert reads == ["a.mp4", "b.mp4", "b.mp4"], "a.mp4 is not encoded again"
+    assert sorted(record["outputs"]) == ["a", "b"]
+    assert record["statistics"]["clips"] == 4
+    assert not (out / "manifest.partial.json").exists()
+
+
+def test_an_unfinished_extraction_is_only_resumed_with_the_same_settings(
+    tmp_path, monkeypatch, encoder
+):
+    out, _ = _interrupted(tmp_path, monkeypatch, encoder)
+    with pytest.raises(FileExistsError, match="other settings"):
+        _extract(encoder, tmp_path, out, stride=8)
+
+
 @pytest.mark.parametrize("batch", [0, -1, True])
 def test_encode_clips_rejects_invalid_batches(encoder, batch):
     with pytest.raises(ValueError, match="batch"):
