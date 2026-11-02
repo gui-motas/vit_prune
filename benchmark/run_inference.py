@@ -127,13 +127,23 @@ def encoders(model, policy, region) -> dict[str, PrunedEncoder]:
     return {name: PrunedEncoder(model, GEOMETRY, plans[name]) for name in VARIANTS}
 
 
+def inside_share(kept: torch.Tensor, region: torch.Tensor) -> list[float]:
+    """Share of each clip's kept tokens that sit inside the region.
+
+    ``kept`` holds grid positions, ``[clips, slices, kept]``, padded with -1 for a clip
+    that kept fewer tokens than the widest in its batch.
+    """
+    valid = kept >= 0
+    hits = (region.to(kept.device) > 0)[kept.clamp(min=0)] & valid
+    return (hits.sum(dim=(1, 2)) / valid.sum(dim=(1, 2))).tolist()
+
+
 @torch.inference_mode()
 def evaluate_batch(model, clips: list[dict], tensor: torch.Tensor,
                    runners: dict[str, PrunedEncoder], region: torch.Tensor):
     """Every variant on a batch of clips: the rows, and per variant the embeddings and
     class probabilities."""
     tensor = tensor.to(DEVICE)
-    inside = region.to(DEVICE) > 0
     shown = {i: {} for i, clip in enumerate(clips) if clip["show"]}
     rows, outputs, dense = [], {}, None
     for name, encoder in runners.items():
@@ -154,9 +164,7 @@ def evaluate_batch(model, clips: list[dict], tensor: torch.Tensor,
             # Outside the timing: the same decision again, to see where the tokens went.
             with autocast(DEVICE, PRECISION):
                 selection = encoder.select(tensor)
-            valid = selection.kept >= 0
-            hits = inside[selection.kept.clamp(min=0)] & valid
-            shares = (hits.sum(dim=(1, 2)) / valid.sum(dim=(1, 2))).tolist()
+            shares = inside_share(selection.kept, region)
             for i, arrays in shown.items():
                 arrays[f"{name}_kept"] = np.stack([
                     selection.keep_mask(i, s).flatten() for s in range(selection.temporal_slices)
@@ -253,6 +261,19 @@ def write_manifests(policy, runners: dict) -> None:
         ).write(FEATURES / name)
 
 
+def refuse_other_runs(record_path: Path, settings: dict) -> None:
+    """Stop when the results folder holds a run of another policy, region or settings:
+    resuming next to it would mix two experiments."""
+    if not record_path.exists():
+        return
+    before = json.loads(record_path.read_text(encoding="utf-8"))
+    if (before.get("settings") != settings
+            or before.get("policy", {}).get("sha256") != SourceFile.of(POLICY).sha256
+            or before.get("region", {}).get("sha256") != SourceFile.of(REGION).sha256):
+        raise SystemExit(f"{record_path.parent} holds results of another configuration; "
+                         "move them out before running this one")
+
+
 def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
     policy = read_policy(POLICY, PRUNE_LAYER, FRAME_STEP, WEIGHTS)
@@ -264,14 +285,7 @@ def main() -> None:
                 "fixed_mask": FIXED_MASK, "variants": list(VARIANTS), "device": DEVICE,
                 "batch": BATCH, "precision": PRECISION}
     record_path = RESULTS / "run.json"
-    if record_path.exists():
-        # Resuming next to results of another policy or region would mix two experiments.
-        before = json.loads(record_path.read_text(encoding="utf-8"))
-        if (before.get("settings") != settings
-                or before.get("policy", {}).get("sha256") != SourceFile.of(POLICY).sha256
-                or before.get("region", {}).get("sha256") != SourceFile.of(REGION).sha256):
-            raise SystemExit(f"{RESULTS} holds results of another configuration; move them "
-                             "out before running this one")
+    refuse_other_runs(record_path, settings)
     model = load_model()
     if not record_path.exists():
         report = check_backbone(model, GEOMETRY, reference=model.forward_features)
