@@ -51,6 +51,7 @@ from common import (
     videos,
 )
 
+from vitprune.bench.latency import autocast
 from vitprune.core import PrunedEncoder, PruningPlan, check_backbone
 from vitprune.core.priors import top_rows_prior
 from vitprune.pipeline.calibration import read_policy
@@ -66,12 +67,6 @@ POLICY, REGION = Path(SETTINGS["policy"]), Path(SETTINGS["region"])
 CLIPS = RESULTS / "clips.jsonl"
 SELECTIONS = RESULTS / "selection"
 FEATURES = RESULTS / "features"
-
-
-def _autocast():
-    dtype = {"off": None, "fp16": torch.float16, "bf16": torch.bfloat16}[PRECISION]
-    return torch.autocast("cuda", dtype=dtype or torch.float16,
-                          enabled=DEVICE.startswith("cuda") and dtype is not None)
 
 
 def _sync() -> None:
@@ -144,7 +139,7 @@ def evaluate_batch(model, clips: list[dict], tensor: torch.Tensor,
     for name, encoder in runners.items():
         _sync()
         started = time.perf_counter()
-        with _autocast():
+        with autocast(DEVICE, PRECISION):
             if encoder.plan.prunes:
                 embedding, budget = encoder.encode_with_budget(tensor)
                 tokens, regimes = budget.tokens.tolist(), budget.regimes.tolist()
@@ -157,7 +152,7 @@ def evaluate_batch(model, clips: list[dict], tensor: torch.Tensor,
         shares = [None] * len(clips)
         if encoder.plan.prunes:
             # Outside the timing: the same decision again, to see where the tokens went.
-            with _autocast():
+            with autocast(DEVICE, PRECISION):
                 selection = encoder.select(tensor)
             valid = selection.kept >= 0
             hits = inside[selection.kept.clamp(min=0)] & valid
@@ -260,7 +255,7 @@ def write_manifests(policy, runners: dict) -> None:
 
 def main() -> None:
     RESULTS.mkdir(parents=True, exist_ok=True)
-    policy = read_policy(POLICY, PRUNE_LAYER, FRAME_STEP)
+    policy = read_policy(POLICY, PRUNE_LAYER, FRAME_STEP, WEIGHTS)
     region = read_region(REGION, GEOMETRY)
     schedules = {video.stem: plan(video) for video in videos()}
     for video in videos():
