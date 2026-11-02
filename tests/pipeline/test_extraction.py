@@ -10,6 +10,7 @@ import torch
 from vitprune.core import PrunedEncoder, PruningPlan
 from vitprune.core.testing import reference_backbone, reference_geometry
 from vitprune.pipeline import extraction
+from vitprune.pipeline import video as reader
 from vitprune.pipeline.provenance import SourceFile
 
 
@@ -32,7 +33,7 @@ def test_extraction_records_the_actual_protocol_and_fingerprints(tmp_path, monke
     definitions.parent.mkdir(parents=True)
     definitions.write_text("# external model", encoding="utf-8")
     frames = np.zeros((32, 32, 32, 3), dtype=np.uint8)
-    monkeypatch.setattr(extraction, "read_video", lambda path: frames)
+    monkeypatch.setattr(reader, "read_frames", lambda path: iter(frames))
     folder = tmp_path / "features"
     path = extraction.extract_folder(
         encoder, video, folder, batch=2, device="cpu", precision="off",

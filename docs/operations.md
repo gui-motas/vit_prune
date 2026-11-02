@@ -18,7 +18,9 @@ vitprune evaluate --features features/adaptive --downstream-project /path/to/loc
 ```
 
 `calibrate` measures redundancy and motion on calibration videos, running only the
-blocks up to the cut, and writes the adaptive budget to a policy file. Calibration
+blocks up to the cut, and writes the adaptive budget to a policy file.
+`--clips-per-video N` takes N clips spread evenly over each video instead of every
+clip; the first clips of a video are not a sample of it. Calibration
 videos must not be part of the evaluation. A policy file is never overwritten, and a
 policy is refused when used with a different `--prune-layer` or `--frame-step` than it
 was calibrated with. Use the same stride and precision as the extraction.

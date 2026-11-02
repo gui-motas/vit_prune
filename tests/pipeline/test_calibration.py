@@ -10,7 +10,7 @@ import pytest
 from vitprune.core import ClipGeometry, PrunedEncoder, PruningPlan
 from vitprune.core.policy import BudgetPolicy
 from vitprune.core.testing import reference_backbone, reference_geometry
-from vitprune.pipeline import calibration, extraction
+from vitprune.pipeline import calibration, video
 from vitprune.pipeline.calibration import calibrate_videos, read_policy, write_policy
 from vitprune.pipeline.cli import main
 
@@ -30,8 +30,8 @@ def videos(tmp_path, monkeypatch):
     folder.mkdir()
     for name in ("a.mp4", "b.mp4"):
         (folder / name).write_bytes(name.encode())
-    monkeypatch.setattr(calibration, "read_video", _frames)
-    monkeypatch.setattr(extraction, "read_video", _frames)
+    monkeypatch.setattr(video, "read_frames", lambda path: iter(_frames(path)))
+    monkeypatch.setattr(calibration, "frame_count", lambda path: len(_frames(path)))
     return folder
 
 
@@ -58,8 +58,11 @@ def test_calibration_records_the_policy_and_its_conditions(encoder, videos):
     assert [len(v["source"]["sha256"]) for v in record["videos"]] == [64, 64]
 
 
-def test_calibration_stops_at_the_clip_limit(encoder, videos):
-    assert _calibrate(encoder, videos, limit=4)["calibration"]["clips"] == 4
+def test_calibration_spreads_its_clips_over_each_video(encoder, videos):
+    """The first clips of a video are not a sample of it."""
+    record = _calibrate(encoder, videos, per_video=2)["calibration"]
+    assert record["clips"] == 4
+    assert [v["clips"] for v in record["videos"]] == [2, 2]
 
 
 def test_a_policy_file_is_never_overwritten(encoder, videos, tmp_path):
@@ -140,6 +143,20 @@ def test_extraction_without_a_policy_is_the_dense_baseline(model, videos, tmp_pa
     assert manifest["settings"]["budget"] is None
     assert manifest["cost"]["predicted_speedup"] == 1.0
     assert all("budget" not in video for video in manifest["outputs"].values())
+
+
+def test_run_reads_one_video_as_a_stream(model, videos, tmp_path):
+    policy, out = tmp_path / "policy.json", tmp_path / "run"
+    common = [*model, "--precision", "off", "--prune-layer", "1"]
+    levels = ["--levels", *map(str, LEVELS)]
+    assert main(["calibrate", *common, "--videos", str(videos), *levels, "--out", str(policy)]) == 0
+
+    single = ["--video", str(videos / "a.mp4"), "--policy", str(policy), "--compare"]
+    assert main(["run", *common, *single, "--inspect-clips", "2", "--out", str(out)]) == 0
+
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["timing"]["clips"] == 3
+    assert report["timing"]["measured_speedup"] is not None
 
 
 def test_extraction_refuses_a_policy_from_another_cut(model, videos, tmp_path):

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import asdict
 from pathlib import Path
 
@@ -23,7 +24,7 @@ import torch
 from vitprune.bench.cost import as_dict, budget_cost
 from vitprune.core.encoder import PrunedEncoder
 from vitprune.pipeline.provenance import Manifest, SourceFile
-from vitprune.pipeline.video import find_videos, read_video, to_clips
+from vitprune.pipeline.video import find_videos, iter_clips
 
 #: Field name inside the compressed file. Downstream readers look for exactly this.
 FEATURE_KEY = "feats"
@@ -83,7 +84,7 @@ def extract_folder(
 
     for position, video in enumerate(found, start=1):
         moment = time.time()
-        clips = to_clips(read_video(video), encoder.geometry, stride, frame_step)
+        clips = (clip for _, clip in iter_clips(video, encoder.geometry, stride, frame_step))
         embeddings, budget = _encode(encoder, clips, batch, device, precision)
         np.savez(destination / f"{video.stem}.npz", **{FEATURE_KEY: embeddings})
 
@@ -143,26 +144,31 @@ def extract_video(
         deliberate: halving the file size saves little and risks introducing a
         difference that would later be mistaken for an effect of the method.
     """
-    clips = to_clips(read_video(video), encoder.geometry, stride, frame_step)
+    clips = (clip for _, clip in iter_clips(video, encoder.geometry, stride, frame_step))
     return encode_clips(encoder, clips, batch, device, precision)
 
 
 @torch.no_grad()
 def encode_clips(
     encoder: PrunedEncoder,
-    clips: torch.Tensor,
+    clips: torch.Tensor | Iterable[torch.Tensor],
     batch: int = 8,
     device: str = "cuda",
     precision: str = "fp16",
 ) -> np.ndarray:
-    """Run the clips through the encoder in batches."""
+    """Run the clips through the encoder in batches.
+
+    ``clips`` is a tensor of clips or any iterable of single clips, such as
+    :func:`vitprune.pipeline.video.iter_clips`, so a long video never has to be in
+    memory at once.
+    """
     return _encode(encoder, clips, batch, device, precision)[0]
 
 
 @torch.no_grad()
 def encode_clips_with_budget(
     encoder: PrunedEncoder,
-    clips: torch.Tensor,
+    clips: torch.Tensor | Iterable[torch.Tensor],
     batch: int = 8,
     device: str = "cuda",
     precision: str = "fp16",
@@ -178,18 +184,31 @@ def encode_clips_with_budget(
     return _encode(encoder, clips, batch, device, precision)
 
 
+def _batches(clips, size: int):
+    if isinstance(clips, torch.Tensor):
+        for start in range(0, clips.shape[0], size):
+            yield clips[start : start + size]
+        return
+    pending = []
+    for clip in clips:
+        pending.append(clip)
+        if len(pending) == size:
+            yield torch.stack(pending)
+            pending = []
+    if pending:
+        yield torch.stack(pending)
+
+
 def _encode(encoder, clips, batch, device, precision) -> tuple[np.ndarray, dict | None]:
     _validate_encoding(batch, precision)
-    if clips.shape[0] < 1:
-        raise ValueError("at least one clip is needed to encode")
     dtype = _precision(precision)
     on_gpu = str(device).startswith("cuda")
     adaptive = encoder.plan.budget is not None and encoder.plan.prunes
     pieces = []
     record: dict[str, list] = {"tokens": [], "regimes": [], "redundancy": [], "motion": []}
 
-    for start in range(0, clips.shape[0], batch):
-        chunk = clips[start : start + batch].to(device, non_blocking=True)
+    for chunk in _batches(clips, batch):
+        chunk = chunk.to(device, non_blocking=True)
         with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
             if adaptive:
                 embeddings, budget = encoder.encode_with_budget(chunk)
@@ -204,6 +223,8 @@ def _encode(encoder, clips, batch, device, precision) -> tuple[np.ndarray, dict 
                 raise ValueError("encoder produced non-finite embeddings")
             pieces.append(embeddings)
 
+    if not pieces:
+        raise ValueError("at least one clip is needed to encode")
     return torch.cat(pieces).numpy().astype(np.float32), record if adaptive else None
 
 

@@ -62,9 +62,15 @@ def read_weights(path: str | Path) -> dict[str, torch.Tensor]:
     """Extract the weights from a checkpoint, unwrapping as needed.
 
     Handles files that store the weights under a key and layer names that carry a
-    prefix.
+    prefix. The file is memory-mapped rather than read: a training checkpoint can carry
+    an optimiser state several times the size of the model, and only the weights are
+    ever touched.
     """
-    raw: Any = torch.load(str(path), map_location="cpu", weights_only=False)
+    try:
+        raw: Any = torch.load(str(path), map_location="cpu", weights_only=False, mmap=True)
+    except RuntimeError:
+        # Only the zip format can be mapped; files in the legacy format are read whole.
+        raw = torch.load(str(path), map_location="cpu", weights_only=False)
 
     for wrapper in _WRAPPERS:
         if isinstance(raw, dict) and wrapper in raw and hasattr(raw[wrapper], "keys"):

@@ -29,6 +29,8 @@ from vitprune.pipeline.video import (
     count_clips,
     find_videos,
     gather_clips,
+    iter_clips,
+    read_frames,
     read_video,
     to_clips,
 )
@@ -51,7 +53,9 @@ __all__ = [
     "find_videos",
     "gather_clips",
     "install_weights",
+    "iter_clips",
     "load_videomae",
+    "read_frames",
     "read_manifest",
     "read_policy",
     "read_video",

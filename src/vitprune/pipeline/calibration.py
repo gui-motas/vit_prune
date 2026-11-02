@@ -24,7 +24,7 @@ from vitprune.core.policy import BudgetPolicy, calibrate_policy
 from vitprune.core.statistics import ClipStatistics
 from vitprune.pipeline.extraction import _precision, _validate_encoding
 from vitprune.pipeline.provenance import SourceFile
-from vitprune.pipeline.video import find_videos, read_video, to_clips
+from vitprune.pipeline.video import find_videos, frame_count, iter_clips, spread_starts
 
 
 def calibrate_videos(
@@ -37,7 +37,7 @@ def calibrate_videos(
     batch: int = 8,
     device: str = "cuda",
     precision: str = "fp16",
-    limit: int | None = None,
+    per_video: int | None = None,
     weights_path: str | Path | None = None,
     progress=print,
 ) -> dict[str, Any]:
@@ -49,39 +49,51 @@ def calibrate_videos(
         levels: tokens kept per clip in each regime.
         motion_balance: weight of motion against redundancy in the budget.
         stride, frame_step: how clips are sampled; use the extraction values.
-        batch, device, precision: how the blocks up to the cut are run.
-        limit: stop after this many clips, or use every clip when ``None``.
+        batch, device, precision: how the blocks up to the cut run.
+        per_video: clips taken from each video, spread evenly over it; every clip
+            when ``None``. The first clips of a video are not a sample of it.
         weights_path: the checkpoint, recorded for traceability.
         progress: where to send progress output.
 
     Returns:
         The content of a policy file, ready for :func:`write_policy`.
+
+    Videos are read a frame at a time, so their length is not limited by memory.
     """
     found = find_videos(videos)
     if not found:
         raise FileNotFoundError(f"no video found in {videos}")
-    if limit is not None and limit < 1:
-        raise ValueError("the clip limit must be positive")
+    if per_video is not None and per_video < 1:
+        raise ValueError("clips per video must be positive")
     _validate_encoding(batch, precision)
     dtype = _precision(precision)
     on_gpu = str(device).startswith("cuda")
 
+    def measure(clips: list[torch.Tensor]) -> None:
+        chunk = torch.stack(clips).to(device)
+        with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
+            statistics = encoder.statistics(chunk)
+        redundancy.append(statistics.redundancy.cpu())
+        motion.append(statistics.motion.cpu())
+
     redundancy, motion, sources, total = [], [], [], 0
     for video in found:
-        clips = to_clips(read_video(video), encoder.geometry, stride, frame_step)
-        if limit is not None:
-            clips = clips[: limit - total]
-        for start in range(0, clips.shape[0], batch):
-            chunk = clips[start : start + batch].to(device)
-            with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
-                statistics = encoder.statistics(chunk)
-            redundancy.append(statistics.redundancy.cpu())
-            motion.append(statistics.motion.cpu())
-        total += clips.shape[0]
-        sources.append({"source": asdict(SourceFile.of(video)), "clips": int(clips.shape[0])})
-        progress(f"[calibrate] {video.name}: {clips.shape[0]} clips")
-        if limit is not None and total >= limit:
-            break
+        starts = None
+        if per_video is not None:
+            starts = spread_starts(frame_count(video), per_video, encoder.geometry, stride,
+                                   frame_step)
+        pending, clips = [], 0
+        for _, clip in iter_clips(video, encoder.geometry, stride, frame_step, starts):
+            pending.append(clip)
+            clips += 1
+            if len(pending) == batch:
+                measure(pending)
+                pending = []
+        if pending:
+            measure(pending)
+        total += clips
+        sources.append({"source": asdict(SourceFile.of(video)), "clips": clips})
+        progress(f"[calibrate] {video.name}: {clips} clips")
 
     policy = calibrate_policy(
         ClipStatistics(torch.cat(redundancy), torch.cat(motion)), levels, motion_balance
@@ -90,6 +102,7 @@ def calibrate_videos(
         "policy": policy.to_dict(),
         "calibration": {
             "clips": total,
+            "clips_per_video": per_video,
             "videos": sources,
             "prune_layer": encoder.plan.prune_layer,
             "stride": stride,

@@ -5,13 +5,21 @@ from torch import nn
 
 from vitprune.core.geometry import ClipGeometry
 from vitprune.core.testing import reference_backbone, reference_geometry
+from vitprune.pipeline import video
 from vitprune.pipeline.checkpoint import (
     LoadReport,
     disable_activation_checkpointing,
     install_weights,
     read_weights,
 )
-from vitprune.pipeline.video import clip_span, count_clips, find_videos, to_clips
+from vitprune.pipeline.video import (
+    clip_span,
+    count_clips,
+    find_videos,
+    iter_clips,
+    spread_starts,
+    to_clips,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +199,54 @@ def test_the_clip_count_matches_what_extraction_produces():
             count_clips(120, g, stride=5, frame_step=step)
             == to_clips(frames, g, stride=5, frame_step=step).shape[0]
         )
+
+
+@pytest.mark.parametrize("total", [3, 15, 16, 23, 24, 64, 71])
+@pytest.mark.parametrize("stride,step", [(8, 2), (5, 1)])
+def test_streamed_clips_equal_the_clips_of_the_whole_video(monkeypatch, total, stride, step):
+    """Reading a frame at a time must not change a single value, including the padding
+    of a video shorter than one clip."""
+    g, frames = reference_geometry(), _frames(total)
+    monkeypatch.setattr(video, "read_frames", lambda path: iter(frames))
+
+    streamed = list(iter_clips("x.mp4", g, stride=stride, frame_step=step))
+    expected = to_clips(frames, g, stride=stride, frame_step=step)
+
+    assert [start for start, _ in streamed] == list(range(0, len(streamed) * stride, stride))
+    assert torch.equal(torch.stack([clip for _, clip in streamed]), expected)
+
+
+def test_streaming_can_keep_only_some_clips(monkeypatch):
+    g, frames = reference_geometry(), _frames(64)
+    monkeypatch.setattr(video, "read_frames", lambda path: iter(frames))
+
+    streamed = dict(iter_clips("x.mp4", g, stride=8, starts=[8, 40, 41, 999]))
+
+    assert sorted(streamed) == [8, 40]
+    assert torch.equal(streamed[40], to_clips(frames, g, stride=8)[5])
+
+
+def test_a_streamed_video_with_no_frames_is_rejected(monkeypatch):
+    monkeypatch.setattr(video, "read_frames", lambda path: iter([]))
+    with pytest.raises(ValueError, match="no frames"):
+        list(iter_clips("x.mp4", reference_geometry()))
+
+
+def test_spread_starts_cover_the_whole_video():
+    g = reference_geometry()
+    assert spread_starts(64, 3, g, stride=8) == [0, 24, 48]
+    assert spread_starts(64, 100, g, stride=8) == list(range(0, 49, 8))
+
+
+def test_weights_load_from_the_legacy_format_too(tmp_path):
+    """Memory-mapping needs the zip format; older files fall back to a plain read."""
+    model = Small()
+    path = tmp_path / "weights.pth"
+    torch.save(model.state_dict(), path, _use_new_zipfile_serialization=False)
+
+    loaded = read_weights(path)
+
+    assert all(torch.equal(loaded[k], v) for k, v in model.state_dict().items())
 
 
 def test_finding_videos_ignores_other_files(tmp_path):

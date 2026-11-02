@@ -196,7 +196,7 @@ def _run_single(args) -> int:
         extraction_settings,
     )
     from vitprune.pipeline.provenance import Manifest, SourceFile
-    from vitprune.pipeline.video import read_video, to_clips
+    from vitprune.pipeline.video import iter_clips
 
     geometry = ClipGeometry.videomae_giant()
     plan = _plan_from(args, geometry)
@@ -208,46 +208,61 @@ def _run_single(args) -> int:
         if (destination / name).exists():
             raise FileExistsError(f"refusing to overwrite {destination / name}")
 
-    started = time.perf_counter()
-    frames = read_video(args.video)
-    clips = to_clips(frames, geometry, args.stride, args.frame_step)
-    read_seconds = time.perf_counter() - started
-    print(f"[1/4] video read: {frames.shape[0]} frames -> {clips.shape[0]} clips")
-
     backbone = _load_backbone(args)
     encoder = PrunedEncoder(backbone, geometry, plan)
-    print(f"[2/4] backbone loaded | {plan.describe()}")
+    print(f"[1/3] backbone loaded | {plan.describe()}")
 
+    def stream(spent: list[float], kept: list[torch.Tensor]):
+        """The clips of the video, one at a time, timing what reading them costs."""
+        clips = iter_clips(args.video, geometry, args.stride, args.frame_step)
+        while True:
+            started = time.perf_counter()
+            item = next(clips, None)
+            spent[0] += time.perf_counter() - started
+            if item is None:
+                return
+            if len(kept) < args.inspect_clips:
+                kept.append(item[1])
+            yield item[1]
+
+    read, sample = [0.0], []
     started = time.perf_counter()
     budget = None
     if plan.budget is not None:
         embeddings, budget = encode_clips_with_budget(
-            encoder, clips, args.batch, args.device, args.precision
+            encoder, stream(read, sample), args.batch, args.device, args.precision
         )
     else:
-        embeddings = encode_clips(encoder, clips, args.batch, args.device, args.precision)
-    encode_seconds = time.perf_counter() - started
-    print(f"[3/4] embeddings produced in {encode_seconds:.1f}s")
+        embeddings = encode_clips(
+            encoder, stream(read, sample), args.batch, args.device, args.precision
+        )
+    read_seconds = read[0]
+    encode_seconds = time.perf_counter() - started - read_seconds
+    clip_count = int(embeddings.shape[0])
+    print(f"[2/3] {clip_count} clips: video read in {read_seconds:.1f}s, "
+          f"embeddings in {encode_seconds:.1f}s")
 
     measured = None
     if args.compare and plan.prunes:
         print("note: exploratory timing without warmup; use 'vitprune latency' for benchmarks")
         dense = PrunedEncoder(backbone, geometry, PruningPlan.dense())
+        reread = [0.0]
         started = time.perf_counter()
-        encode_clips(dense, clips, args.batch, args.device, args.precision)
-        measured = (time.perf_counter() - started) / encode_seconds
-        print(f"[4/4] dense baseline measured: speedup {measured:.2f}x")
+        encode_clips(dense, stream(reread, []), args.batch, args.device, args.precision)
+        measured = (time.perf_counter() - started - reread[0]) / encode_seconds
+        print(f"[3/3] dense baseline measured: speedup {measured:.2f}x")
     else:
-        print("[4/4] no dense baseline (use --compare to measure the real speedup)")
+        print("[3/3] no dense baseline (use --compare to measure the real speedup)")
 
     pruning = None
     if plan.prunes:
-        sample = clips[: min(args.inspect_clips, clips.shape[0])].to(args.device)
         dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}[args.precision]
         with torch.autocast(
             "cuda", dtype=dtype, enabled=str(args.device).startswith("cuda") and dtype is not None
         ):
-            pruning = summarise_pruning(encoder.select(sample), geometry, args.top_rows)
+            pruning = summarise_pruning(
+                encoder.select(torch.stack(sample).to(args.device)), geometry, args.top_rows
+            )
 
     destination.mkdir(parents=True, exist_ok=True)
     np.savez(destination / f"{stem}.npz", **{FEATURE_KEY: embeddings})
@@ -265,7 +280,7 @@ def _run_single(args) -> int:
         timing=TimingSummary(
             read_seconds=round(read_seconds, 2),
             encode_seconds=round(encode_seconds, 2),
-            clips=int(clips.shape[0]),
+            clips=clip_count,
             predicted_speedup=round(cost.predicted_speedup, 3),
             measured_speedup=None if measured is None else round(measured, 3),
         ),
@@ -285,7 +300,7 @@ def _run_single(args) -> int:
         outputs={stem: {
             "source": as_dict(SourceFile.of(args.video)),
             "feature_file": as_dict(SourceFile.of(destination / f"{stem}.npz")),
-            "clips": int(clips.shape[0]),
+            "clips": clip_count,
             **({"budget": budget} if budget is not None else {}),
         }},
         statistics={"read_seconds": read_seconds, "encode_seconds": encode_seconds},
@@ -356,7 +371,7 @@ def _run_calibrate(args) -> int:
         batch=args.batch,
         device=args.device,
         precision=args.precision,
-        limit=args.clips,
+        per_video=args.clips_per_video,
         weights_path=args.weights,
     )
     path = write_policy(args.out, content)
@@ -537,7 +552,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     calibrate.add_argument("--motion-balance", type=float, default=0.5)
     calibrate.add_argument("--prune-layer", type=int, default=2)
-    calibrate.add_argument("--clips", type=int, help="stop after this many clips")
+    calibrate.add_argument(
+        "--clips-per-video", type=int,
+        help="clips taken from each video, spread over it (default: every clip)",
+    )
     calibrate.set_defaults(handler=_run_calibrate)
 
     cost = commands.add_parser("cost", help="estimate cost; needs no GPU or checkpoint")

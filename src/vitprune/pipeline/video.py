@@ -24,6 +24,7 @@ like an effect of pruning.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -40,18 +41,52 @@ CHANNEL_STD = (0.229, 0.224, 0.225)
 VIDEO_SUFFIXES = frozenset({".mp4", ".avi", ".mov", ".mkv", ".webm"})
 
 
+def read_frames(path: str | Path) -> Iterator[np.ndarray]:
+    """Yield the frames of a video file one at a time, in order.
+
+    Each frame is ``[height, width, 3]`` in RGB, values from 0 to 255. Uses ``decord``
+    when available, since it is considerably faster, and falls back to OpenCV.
+    """
+    path = str(path)
+    try:
+        import decord
+    except ImportError:
+        yield from _frames_with_opencv(path)
+        return
+    reader = decord.VideoReader(path, num_threads=2)
+    for index in range(len(reader)):
+        yield reader[index].asnumpy()
+
+
 def read_video(path: str | Path) -> np.ndarray:
-    """Read every frame of a video file.
+    """Read every frame of a video file into memory.
 
     Returns:
         ``[frames, height, width, 3]`` in RGB, values from 0 to 255.
 
-    Uses ``decord`` when available, since it is considerably faster, and falls back
-    to OpenCV otherwise.
+    A few minutes of 1080p take tens of gigabytes this way; the pipeline commands use
+    :func:`iter_clips` instead.
     """
-    path = str(path)
-    frames = _read_with_decord(path)
-    return frames if frames is not None else _read_with_opencv(path)
+    frames = list(read_frames(path))
+    if not frames:
+        raise RuntimeError(f"could not read any frame from {path}")
+    return np.stack(frames)
+
+
+def frame_count(path: str | Path) -> int:
+    """The frame count the container declares, without decoding.
+
+    Containers can be off by a few frames; use it for planning, not for clip starts.
+    """
+    try:
+        import decord
+    except ImportError:
+        cv2 = _opencv()
+        capture = cv2.VideoCapture(str(path))
+        count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        capture.release()
+        return count
+    return len(decord.VideoReader(str(path)))
 
 
 def find_videos(folder: str | Path) -> list[Path]:
@@ -137,6 +172,68 @@ def count_clips(
     return len(_clip_starts(total_frames, clip_span(geometry, frame_step), stride))
 
 
+def iter_clips(
+    path: str | Path,
+    geometry: ClipGeometry | None = None,
+    stride: int = 16,
+    frame_step: int = 2,
+    starts: Iterable[int] | None = None,
+) -> Iterator[tuple[int, torch.Tensor]]:
+    """Yield ``(start, clip)`` in order, decoding the video once.
+
+    The same clips as ``to_clips(read_video(path))`` -- same starts, same padding of a
+    video shorter than one clip, same normalisation -- while holding only the frames
+    the next clips need. ``starts`` keeps only those clips; a start that is not a clip
+    of this video is never yielded.
+    """
+    geometry = geometry or ClipGeometry.videomae_giant()
+    _check_sampling(stride, frame_step)
+    span = clip_span(geometry, frame_step)
+    offsets = [frame_step * k for k in range(geometry.frames_per_clip)]
+    wanted = None if starts is None else set(starts)
+
+    def kept(start: int) -> bool:
+        return start % stride == 0 and (wanted is None or start in wanted)
+
+    def needed(index: int) -> bool:
+        first = max(0, index - offsets[-1])
+        return any(kept(start) and (index - start) % frame_step == 0
+                   for start in range(-(-first // stride) * stride, index + 1, stride))
+
+    frames: dict[int, torch.Tensor] = {}
+    count, last = 0, None
+    for index, frame in enumerate(read_frames(path)):
+        count, last = index + 1, frame
+        if needed(index):
+            frames[index] = _normalise(frame[None], geometry.image_size)[0]
+        start = index + 1 - span
+        if start >= 0 and kept(start):
+            yield start, torch.stack([frames[start + offset] for offset in offsets], dim=1)
+        oldest = -(-max(0, index + 2 - span) // stride) * stride
+        for done in [f for f in frames if f < oldest]:
+            del frames[done]
+    if count == 0:
+        raise ValueError("the video has no frames")
+    if count < span and kept(0):
+        frames[count - 1] = _normalise(last[None], geometry.image_size)[0]
+        yield 0, torch.stack([frames[min(offset, count - 1)] for offset in offsets], dim=1)
+
+
+def spread_starts(
+    total_frames: int,
+    count: int,
+    geometry: ClipGeometry | None = None,
+    stride: int = 16,
+    frame_step: int = 2,
+) -> list[int]:
+    """``count`` clip starts spread evenly over a video, or all of them if fewer."""
+    if count < 1:
+        raise ValueError("the clip count must be positive")
+    geometry = geometry or ClipGeometry.videomae_giant()
+    starts = _clip_starts(total_frames, clip_span(geometry, frame_step), stride)
+    return sorted({starts[round(i)] for i in np.linspace(0, len(starts) - 1, count)})
+
+
 def gather_clips(
     videos: str | Path,
     geometry: ClipGeometry,
@@ -151,13 +248,20 @@ def gather_clips(
     if not found:
         raise FileNotFoundError(f"no video found in {videos}")
 
-    gathered, total = [], 0
+    gathered = []
     for video in found:
-        gathered.append(to_clips(read_video(video), geometry, stride, frame_step))
-        total += gathered[-1].shape[0]
-        if total >= count:
-            break
-    return torch.cat(gathered)[:count]
+        for _, clip in iter_clips(video, geometry, stride, frame_step):
+            gathered.append(clip)
+            if len(gathered) == count:
+                return torch.stack(gathered)
+    return torch.stack(gathered)
+
+
+def _check_sampling(stride: int, frame_step: int) -> None:
+    if stride < 1:
+        raise ValueError(f"stride must be at least 1, got {stride}")
+    if frame_step < 1:
+        raise ValueError(f"frame_step must be at least 1, got {frame_step}")
 
 
 def _clip_starts(total: int, span: int, stride: int) -> list[int]:
@@ -175,31 +279,24 @@ def _normalise(frames: np.ndarray, side: int) -> torch.Tensor:
     return (tensor - mean) / std
 
 
-def _read_with_decord(path: str) -> np.ndarray | None:
-    try:
-        import decord
-    except ImportError:
-        return None
-    return decord.VideoReader(path, num_threads=2)[:].asnumpy()
-
-
-def _read_with_opencv(path: str) -> np.ndarray:
+def _opencv():
     try:
         import cv2
     except ImportError as error:
         raise RuntimeError(
             "reading video requires decord or opencv-python: pip install 'vitprune[pipeline]'"
         ) from error
+    return cv2
 
+
+def _frames_with_opencv(path: str) -> Iterator[np.ndarray]:
+    cv2 = _opencv()
     capture = cv2.VideoCapture(path)
-    frames = []
-    while True:
-        ok, frame = capture.read()
-        if not ok:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    capture.release()
-
-    if not frames:
-        raise RuntimeError(f"could not read any frame from {path}")
-    return np.stack(frames)
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                return
+            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    finally:
+        capture.release()
