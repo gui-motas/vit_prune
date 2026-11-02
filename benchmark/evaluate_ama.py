@@ -1,17 +1,20 @@
 """Run the AMA temporal localizer of the AI City solution on each variant's features.
 
 Needs the features that ``run_inference.py`` writes. Run it with the Python environment
-of the AMA project: its ``eval.py`` runs under the same interpreter, with this folder
-on its path ahead of the installed packages, so that ``nms_1d_cpu.py`` stands in for
-the compiled extension on every machine. Writes, under ``results``:
+of the AMA project: ``vitprune evaluate`` runs its ``eval.py`` under the same
+interpreter, with this folder on its path ahead of the installed packages, so that
+``nms_1d_cpu.py`` stands in for the compiled extension on every machine. Writes, under
+``results``:
 
 * ``ama/labels.json`` -- the annotations of the evaluated videos, with the ``subset``
   field the AMA loader needs;
-* ``ama/<variant>/`` -- the prepared configuration, the predictions and the AMA log;
+* ``ama/<variant>/`` -- the prepared configuration, the predictions, the AMA's output in
+  ``downstream.log`` and the evaluation record;
 * ``ama.json`` -- mAP per tIoU and its average, per variant.
 
 The AMA's configuration is copied, never edited: only the feature folder, the stride
-and the annotation file change, as ``vitprune evaluate`` does.
+and the annotation file change. A variant already evaluated is refused; move
+``results/ama`` out to run it again.
 """
 
 from __future__ import annotations
@@ -19,16 +22,15 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
 
 from common import FRAME_STEP, HERE, RESULTS, SETTINGS, VARIANTS, annotations
 
 from vitprune.pipeline.evaluation import (
+    DOWNSTREAM_LOG,
     DownstreamModel,
     EvaluationRequest,
-    build_command,
-    prepare_config,
+    evaluate,
 )
 
 PER_TIOU = re.compile(r"tIoU = ([\d.]+): mAP = ([\d.]+|nan) %")
@@ -52,13 +54,15 @@ def labels() -> Path:
 
 
 def main() -> None:
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(HERE), os.environ.get("PYTHONPATH")])
+    )
     model = DownstreamModel(
         project_dir=SETTINGS["ama_project"],
         config=SETTINGS["ama_config"],
         weights=SETTINGS["ama_weights"],
     )
     annotated = labels()
-    path = os.pathsep.join(filter(None, [str(HERE), os.environ.get("PYTHONPATH")]))
     found = {}
     for variant in VARIANTS:
         request = EvaluationRequest(
@@ -68,17 +72,8 @@ def main() -> None:
             labels=annotated,
             frame_step=FRAME_STEP,
         )
-        command = build_command(request, prepare_config(request))
-        print(f"[{variant}] {' '.join(command)}", flush=True)
-        finished = subprocess.run(
-            command, cwd=model.project_dir, capture_output=True, text=True, check=False,
-            env={**os.environ, "PYTHONPATH": path},
-        )
-        log = finished.stdout + finished.stderr
-        (request.destination / "ama.log").write_text(log, encoding="utf-8")
-        if finished.returncode != 0:
-            log_path = request.destination / "ama.log"
-            raise RuntimeError(f"the AMA failed on {variant}; see {log_path}")
+        evaluate(request)
+        log = (request.destination / DOWNSTREAM_LOG).read_text(encoding="utf-8")
         average = AVERAGE.search(log)
         found[variant] = {
             "map": {tiou: float(value) for tiou, value in PER_TIOU.findall(log)},
