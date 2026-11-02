@@ -89,7 +89,7 @@ def calibrate_region(
     Returns:
         The content of a region file, ready for :func:`write_region`.
 
-    Videos are read a frame at a time, so their length is not limited by memory.
+    Only the middle frame of each clip is decoded: the reader jumps straight to it.
     """
     found = find_videos(videos)
     if not found:
@@ -105,17 +105,16 @@ def calibrate_region(
         count = frame_count(video)
         starts = (spread_starts(count, per_video, geometry, stride, frame_step) if per_video
                   else _clip_starts(count, span, stride))
-        middles = {min(start + span // 2, count - 1) for start in starts}
         seen = detected = 0
-        for index, frame in enumerate(read_frames(video)):
-            if index in middles:
-                seen += 1
-                box = largest_person(detector(frame), frame.shape[1], frame.shape[0])
-                if box is not None:
-                    boxes.append(box)
-                    detected += 1
-            if index >= max(middles):
+        for middle in sorted({min(start + span // 2, max(count - 1, 0)) for start in starts}):
+            frame = next(read_frames(video, middle), None)
+            if frame is None:
                 break
+            seen += 1
+            box = largest_person(detector(frame), frame.shape[1], frame.shape[0])
+            if box is not None:
+                boxes.append(box)
+                detected += 1
         total += seen
         sources.append(
             {"source": asdict(SourceFile.of(video)), "clips": seen, "detected": detected}
