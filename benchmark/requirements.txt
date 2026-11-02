@@ -1,0 +1,23 @@
+# Everything the benchmark scripts import, in one environment. On a CUDA machine install
+# torch and torchvision from the PyTorch index for that CUDA version first.
+torch
+torchvision
+numpy
+opencv-python
+PyYAML
+timm
+pandas
+openpyxl
+matplotlib
+# YOLOv5 of the AI City preprocessing (vitprune region)
+seaborn
+pillow
+requests
+tqdm
+psutil
+setuptools<81
+# AMA localizer (video_level.py, evaluate_ama.py)
+loguru
+transformers
+joblib
+scipy

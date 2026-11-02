@@ -1,0 +1,5 @@
+videos/
+cache/
+results/
+settings.json
+*.log
