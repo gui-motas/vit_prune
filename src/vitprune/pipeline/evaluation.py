@@ -45,6 +45,8 @@ from vitprune.pipeline.provenance import Manifest, SourceFile, read_manifest
 #: Name given to the prepared copy of the configuration, inside the results folder.
 PREPARED_CONFIG = "prepared-config.yaml"
 EVALUATION_MANIFEST = "evaluation-manifest.json"
+#: Everything the downstream model printed, with the figures it reports.
+DOWNSTREAM_LOG = "downstream.log"
 
 
 @dataclass
@@ -196,9 +198,14 @@ def build_command(request: EvaluationRequest, prepared_config: Path) -> list[str
 def evaluate(request: EvaluationRequest, progress=print) -> Path:
     """Prepare the configuration and run the downstream model.
 
+    The model's output goes to ``progress`` as it runs and to ``downstream.log`` in the
+    results folder, which holds the figures the model printed.
+
     Returns:
         The results folder.
     """
+    if (request.destination / EVALUATION_MANIFEST).exists():
+        raise FileExistsError(f"refusing to overwrite the evaluation in {request.destination}")
     prepared = prepare_config(request)
     command = build_command(request, prepared)
     try:
@@ -230,20 +237,25 @@ def evaluate(request: EvaluationRequest, progress=print) -> Path:
     progress(f"[evaluate] running: {' '.join(command)}")
 
     try:
-        finished = subprocess.run(command, cwd=request.model.project_dir, check=False)
+        with (request.destination / DOWNSTREAM_LOG).open("w", encoding="utf-8") as log, \
+                subprocess.Popen(command, cwd=request.model.project_dir, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, errors="replace") as child:
+            for line in child.stdout:
+                log.write(line)
+                progress(line.rstrip("\n"))
     except OSError:
         record.statistics = {"status": "launch_failed"}
         record.write(request.destination, EVALUATION_MANIFEST)
         raise
     record.statistics = {
-        "status": "finished" if finished.returncode == 0 else "failed",
-        "returncode": finished.returncode,
+        "status": "finished" if child.returncode == 0 else "failed",
+        "returncode": child.returncode,
     }
     record.write(request.destination, EVALUATION_MANIFEST)
-    if finished.returncode != 0:
+    if child.returncode != 0:
         raise RuntimeError(
-            f"the downstream model exited with code {finished.returncode}. "
-            f"Configuration used: {prepared}"
+            f"the downstream model exited with code {child.returncode}. "
+            f"Configuration used: {prepared}; its output is in {DOWNSTREAM_LOG}"
         )
 
     progress(f"[evaluate] finished -> {request.destination}")

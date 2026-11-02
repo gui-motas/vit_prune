@@ -48,8 +48,9 @@ No command here recognises actions directly: `evaluate` invokes the external mod
 - `extract`: one `VIDEO.npz` per video and `manifest.json`. With a policy, the
   manifest records the policy and, per video, each clip's tokens, regime, redundancy
   and motion; `feats` is unchanged.
-- `evaluate`: `prepared-config.yaml`, `evaluation-manifest.json`, and the external
-  model's results, requested at `predictions.csv`.
+- `evaluate`: `prepared-config.yaml`, `evaluation-manifest.json`, `downstream.log` with
+  everything the external model printed, and its results, requested at
+  `predictions.csv`. A folder that already holds an evaluation is refused.
 - Measurement `--save`: metrics plus arguments, environment and checkpoint identity
   where applicable.
 

@@ -10,6 +10,7 @@ pytest.importorskip("yaml")
 import yaml
 
 from vitprune.pipeline.evaluation import (
+    DOWNSTREAM_LOG,
     EVALUATION_MANIFEST,
     PREPARED_CONFIG,
     DownstreamModel,
@@ -232,25 +233,31 @@ def test_input_width_mismatch_aborts(downstream, features, tmp_path):
 
 
 @pytest.mark.parametrize("code", [0, 1])
-def test_evaluation_records_command_inputs_and_exit_status(
-    downstream, features, tmp_path, monkeypatch, code
-):
+def test_evaluation_records_command_inputs_and_exit_status(downstream, features, tmp_path, code):
     import json
-    from types import SimpleNamespace
 
-    monkeypatch.setattr(
-        "vitprune.pipeline.evaluation.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=code),
-    )
-    out = tmp_path / "out"
+    script = f"import sys\nprint('Average Map is : 42.0 %')\nsys.exit({code})\n"
+    (downstream.project_dir / "eval.py").write_text(script, encoding="utf-8")
+    out, printed = tmp_path / "out", []
     request = EvaluationRequest(features, downstream, out)
     if code:
         with pytest.raises(RuntimeError, match="exited"):
-            evaluate(request)
+            evaluate(request, progress=printed.append)
     else:
-        assert evaluate(request) == out
+        assert evaluate(request, progress=printed.append) == out
     record = json.loads((out / EVALUATION_MANIFEST).read_text(encoding="utf-8"))
     assert record["statistics"]["returncode"] == code
     assert record["settings"]["prepared_config"]["sha256"]
     assert record["settings"]["extraction_manifest"]["settings"]["prune_layer"] == 2
     assert record["weights"]["sha256"]
+    assert "Average Map is : 42.0 %" in printed
+    assert "42.0" in (out / DOWNSTREAM_LOG).read_text(encoding="utf-8")
+
+
+def test_an_earlier_evaluation_is_not_overwritten(downstream, features, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / EVALUATION_MANIFEST).write_text("{}", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="overwrite"):
+        evaluate(EvaluationRequest(features, downstream, out))
+    assert (out / EVALUATION_MANIFEST).read_text(encoding="utf-8") == "{}"
