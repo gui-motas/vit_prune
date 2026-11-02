@@ -39,6 +39,9 @@ from vitprune.core.geometry import ClipGeometry
 DEFAULT_WARMUP = 5
 DEFAULT_ITERATIONS = 20
 
+#: Reduced precision of the forward pass, by name; ``off`` keeps single precision.
+PRECISIONS = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}
+
 
 @dataclass(frozen=True)
 class LatencyPoint:
@@ -124,15 +127,14 @@ def measure_plans(
         raise ValueError("at least one clip is needed to measure latency")
 
     geometry = geometry or ClipGeometry.videomae_giant()
-    dtype = _precision(precision)
     encoders = [PrunedEncoder(backbone, geometry, plan) for plan in plans]
     sample = clips.to(device)
 
     points: list[LatencyPoint] = []
     baseline_ms: float | None = None
     for plan, encoder in zip(plans, encoders, strict=True):
-        tokens = _tokens_kept(encoder, sample, device, dtype)
-        times, peak = _time(encoder, sample, warmup, iterations, device, dtype)
+        tokens = _tokens_kept(encoder, sample, device, precision)
+        times, peak = _time(encoder, sample, warmup, iterations, device, precision)
         ms = float(np.mean(times))
         if baseline_ms is None:
             baseline_ms = ms
@@ -155,23 +157,23 @@ def measure_plans(
     return points
 
 
-def _tokens_kept(encoder: PrunedEncoder, sample, device, dtype) -> list[int]:
+def _tokens_kept(encoder: PrunedEncoder, sample, device, precision) -> list[int]:
     """Tokens each clip keeps after the cut. Runs once, outside the timed loop."""
     if not encoder.plan.prunes:
         return [encoder.geometry.num_tokens] * sample.shape[0]
-    with torch.no_grad(), _autocast(device, dtype):
+    with torch.no_grad(), autocast(device, precision):
         _, budget = encoder.encode_with_budget(sample)
     return budget.tokens.tolist()
 
 
-def _time(encoder, sample, warmup, iterations, device, dtype) -> tuple[list[float], float]:
+def _time(encoder, sample, warmup, iterations, device, precision) -> tuple[list[float], float]:
     """Milliseconds per clip for each timed iteration, and the peak memory in GB."""
     on_gpu = str(device).startswith("cuda")
     times = []
 
     with torch.no_grad():
         for _ in range(warmup):
-            with _autocast(device, dtype):
+            with autocast(device, precision):
                 encoder.encode(sample)
 
         if on_gpu:
@@ -180,7 +182,7 @@ def _time(encoder, sample, warmup, iterations, device, dtype) -> tuple[list[floa
 
         for _ in range(iterations):
             started = time.perf_counter()
-            with _autocast(device, dtype):
+            with autocast(device, precision):
                 encoder.encode(sample)
             if on_gpu:
                 torch.cuda.synchronize()
@@ -190,14 +192,11 @@ def _time(encoder, sample, warmup, iterations, device, dtype) -> tuple[list[floa
     return times, peak
 
 
-def _autocast(device, dtype):
+def autocast(device, precision: str):
+    """The reduced precision every forward pass runs under: on CUDA only, none for "off"."""
+    if precision not in PRECISIONS:
+        raise ValueError(f"unknown precision '{precision}'. Use: {', '.join(PRECISIONS)}")
+    dtype = PRECISIONS[precision]
     return torch.autocast(
         "cuda", dtype=dtype, enabled=str(device).startswith("cuda") and dtype is not None
     )
-
-
-def _precision(name: str):
-    table = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}
-    if name not in table:
-        raise ValueError(f"unknown precision '{name}'. Use: {', '.join(table)}")
-    return table[name]

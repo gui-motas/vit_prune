@@ -19,10 +19,11 @@ from typing import Any
 
 import torch
 
+from vitprune.bench.latency import autocast
 from vitprune.core.encoder import PrunedEncoder
 from vitprune.core.policy import BudgetPolicy, calibrate_policy
 from vitprune.core.statistics import ClipStatistics
-from vitprune.pipeline.extraction import _precision, _validate_encoding
+from vitprune.pipeline.extraction import _validate_encoding
 from vitprune.pipeline.provenance import SourceFile
 from vitprune.pipeline.video import find_videos, frame_count, iter_clips, spread_starts
 
@@ -66,12 +67,10 @@ def calibrate_videos(
     if per_video is not None and per_video < 1:
         raise ValueError("clips per video must be positive")
     _validate_encoding(batch, precision)
-    dtype = _precision(precision)
-    on_gpu = str(device).startswith("cuda")
 
     def measure(clips: list[torch.Tensor]) -> None:
         chunk = torch.stack(clips).to(device)
-        with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
+        with autocast(device, precision):
             statistics = encoder.statistics(chunk)
         redundancy.append(statistics.redundancy.cpu())
         motion.append(statistics.motion.cpu())

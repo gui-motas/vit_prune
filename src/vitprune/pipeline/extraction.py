@@ -22,6 +22,7 @@ import numpy as np
 import torch
 
 from vitprune.bench.cost import as_dict, budget_cost
+from vitprune.bench.latency import PRECISIONS, autocast
 from vitprune.core.encoder import PrunedEncoder
 from vitprune.pipeline.provenance import Manifest, SourceFile
 from vitprune.pipeline.video import find_videos, iter_clips
@@ -201,15 +202,13 @@ def _batches(clips, size: int):
 
 def _encode(encoder, clips, batch, device, precision) -> tuple[np.ndarray, dict | None]:
     _validate_encoding(batch, precision)
-    dtype = _precision(precision)
-    on_gpu = str(device).startswith("cuda")
-    adaptive = encoder.plan.budget is not None and encoder.plan.prunes
+    adaptive = encoder.plan.prunes
     pieces = []
     record: dict[str, list] = {"tokens": [], "regimes": [], "redundancy": [], "motion": []}
 
     for chunk in _batches(clips, batch):
         chunk = chunk.to(device, non_blocking=True)
-        with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
+        with autocast(device, precision):
             if adaptive:
                 embeddings, budget = encoder.encode_with_budget(chunk)
                 record["tokens"] += budget.tokens.tolist()
@@ -302,14 +301,8 @@ def extraction_settings(
     }
 
 
-def _precision(name: str):
-    table = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}
-    if name not in table:
-        raise ValueError(f"unknown precision '{name}'. Use: {', '.join(table)}")
-    return table[name]
-
-
 def _validate_encoding(batch: int, precision: str) -> None:
     if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
         raise ValueError("batch must be a positive integer")
-    _precision(precision)
+    if precision not in PRECISIONS:
+        raise ValueError(f"unknown precision '{precision}'. Use: {', '.join(PRECISIONS)}")

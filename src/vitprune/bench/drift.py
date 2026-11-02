@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from vitprune.bench.latency import autocast
 from vitprune.core.encoder import PrunedEncoder, PruningPlan
 
 
@@ -91,18 +92,12 @@ def measure_drift(
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense())
     pruned = PrunedEncoder(backbone, geometry, plan)
 
-    precisions = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}
-    if precision not in precisions:
-        raise ValueError("precision must be fp16, bf16 or off")
-    dtype = precisions[precision]
-    on_gpu = str(device).startswith("cuda")
-
     cosines: list[float] = []
     distances: list[float] = []
 
     for index in range(clips.shape[0]):
         one = clips[index : index + 1].to(device)
-        with torch.autocast("cuda", dtype=dtype, enabled=on_gpu and dtype is not None):
+        with autocast(device, precision):
             a = dense.encode(one).float()
             b = pruned.encode(one).float()
         if not torch.isfinite(a).all() or not torch.isfinite(b).all():

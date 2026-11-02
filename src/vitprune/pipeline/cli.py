@@ -187,6 +187,7 @@ def _run_single(args) -> int:
     import torch
 
     from vitprune.bench.cost import as_dict, budget_cost
+    from vitprune.bench.latency import autocast
     from vitprune.bench.report import EmbeddingSummary, RunReport, TimingSummary, summarise_pruning
     from vitprune.core.encoder import PrunedEncoder, PruningPlan
     from vitprune.pipeline.extraction import (
@@ -256,10 +257,7 @@ def _run_single(args) -> int:
 
     pruning = None
     if plan.prunes:
-        dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "off": None}[args.precision]
-        with torch.autocast(
-            "cuda", dtype=dtype, enabled=str(args.device).startswith("cuda") and dtype is not None
-        ):
+        with autocast(args.device, args.precision):
             pruning = summarise_pruning(
                 encoder.select(torch.stack(sample).to(args.device)), geometry, args.top_rows
             )
