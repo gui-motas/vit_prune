@@ -1,19 +1,21 @@
-"""The driver region: where a person detector found the driver in calibration footage.
+"""The driver region: the crop of the driver a person detector gives in calibration footage.
 
-The region is the set of grid positions the driver occupied at least once, joined over
-the middle frame of every calibration clip. A plan carrying it as its spatial prior
-fills each slice's slots from inside the region first; tokens outside only take the
-slots left over, and still merge into kept ones. The backbone input is untouched, so a
-model trained on the whole frame still sees the whole frame.
+A plan carrying the region as its spatial prior fills each slice's slots from inside it
+first; tokens outside only take the slots left over, and still merge into kept ones. The
+backbone input is untouched, so a model trained on the whole frame still sees the whole
+frame.
 
 The detector runs here, once per camera setup, never during extraction: any COCO model
-Ultralytics loads, such as YOLO26s. The rule follows the AI City preprocessing the
-downstream model came from: COCO class 0 (person), confidence above 0.5, the largest
-box in the frame.
+Ultralytics loads, such as YOLO26s. The region follows the AI City preprocessing the
+downstream model came from, which crops each video to one rectangle: the largest
+confident person box (COCO class 0, confidence above 0.5) found anywhere in it. Each
+calibration video gives that crop, from the middle frame of its sampled clips, and the
+region is their median, coordinate by coordinate: one rectangle, like the crops the
+model was trained on, which a driver or a framing unlike the rest cannot stretch.
 
-Joining rather than counting is deliberate. A frequency would rank down the places the
-driver visits rarely, which is where the rare actions happen. A union has no parameter
-and errs on the safe side: a spurious box can only widen the region.
+Joining every box instead does not work with a dashboard camera: the driver fills about
+40% of the frame and moves, so the union of 2500 boxes over 16 calibration videos covered
+91% of the frame and excluded almost nothing.
 """
 
 from __future__ import annotations
@@ -74,7 +76,7 @@ def calibrate_region(
     detector_record: dict[str, Any] | None = None,
     progress=print,
 ) -> dict[str, Any]:
-    """Detect the driver in the middle frame of every clip and join the boxes.
+    """Find the driver's crop in every calibration video and take their median.
 
     Args:
         videos: a folder or a single video file, not part of the evaluation.
@@ -89,7 +91,9 @@ def calibrate_region(
     Returns:
         The content of a region file, ready for :func:`write_region`.
 
-    Only the middle frame of each clip is decoded: the reader jumps straight to it.
+    Only the middle frame of each clip is decoded: the reader jumps straight to it. A
+    video's crop is its largest box over those frames; AI City looks at every frame, so
+    sampling can only find a crop as large or smaller.
     """
     found = find_videos(videos)
     if not found:
@@ -100,12 +104,13 @@ def calibrate_region(
         raise ValueError("clips per video must be positive")
 
     span = clip_span(geometry, frame_step)
-    boxes, sources, total = [], [], 0
+    crops, sources, total, detected_total = [], [], 0, 0
     for video in found:
         count = frame_count(video)
         starts = (spread_starts(count, per_video, geometry, stride, frame_step) if per_video
                   else _clip_starts(count, span, stride))
         seen = detected = 0
+        crop = None
         for middle in sorted({min(start + span // 2, max(count - 1, 0)) for start in starts}):
             frame = next(read_frames(video, middle), None)
             if frame is None:
@@ -113,31 +118,46 @@ def calibrate_region(
             seen += 1
             box = largest_person(detector(frame), frame.shape[1], frame.shape[0])
             if box is not None:
-                boxes.append(box)
                 detected += 1
+                if crop is None or _area(box) > _area(crop):
+                    crop = box
         total += seen
-        sources.append(
-            {"source": asdict(SourceFile.of(video)), "clips": seen, "detected": detected}
-        )
+        detected_total += detected
+        if crop is not None:
+            crops.append(crop)
+        sources.append({
+            "source": asdict(SourceFile.of(video)), "clips": seen, "detected": detected,
+            "crop": None if crop is None else list(crop),
+        })
         progress(f"[region] {video.name}: driver in {detected} of {seen} clips")
 
-    if not boxes:
+    if not crops:
         raise ValueError("no person was detected in the calibration clips; there is no region")
-    prior = box_prior(geometry.grid_size, boxes)
+    # Each crop has x1 < x2 and y1 < y2, so the coordinate medians keep that order.
+    box = tuple(float(value) for value in np.median(np.array(crops), axis=0))
+    prior = box_prior(geometry.grid_size, [box])
     return {
         "region": {"grid_size": geometry.grid_size, "prior": prior.tolist()},
         "calibration": {
             "clips": total,
             "clips_per_video": per_video,
-            "detected": len(boxes),
+            "detected": detected_total,
+            "box": list(box),
             "area": float(prior.mean()),
             "videos": sources,
             "stride": stride,
             "frame_step": frame_step,
-            "rule": {"coco_class": PERSON, "confidence_above": CONFIDENCE, "box": "largest"},
+            "rule": {
+                "coco_class": PERSON, "confidence_above": CONFIDENCE,
+                "box": "largest per video, median over videos",
+            },
             "detector": detector_record,
         },
     }
+
+
+def _area(box: tuple[float, float, float, float]) -> float:
+    return (box[2] - box[0]) * (box[3] - box[1])
 
 
 def write_region(path: str | Path, content: dict[str, Any]) -> Path:

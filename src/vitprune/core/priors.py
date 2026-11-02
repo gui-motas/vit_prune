@@ -14,8 +14,8 @@ installed, not a property of the method. If the videos are already cropped aroun
 subject, the top band may contain their head rather than the window. Use
 :mod:`vitprune.core.inspection` to check against a real frame first.
 
-:func:`box_prior` takes the band from data instead of by hand: the positions a person
-detector found the subject in, across calibration frames.
+:func:`box_prior` takes the band from data instead of by hand: the crop a person
+detector gives the subject in calibration footage.
 """
 
 from __future__ import annotations

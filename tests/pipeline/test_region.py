@@ -26,24 +26,29 @@ LEVELS = [16, 32, 48]
 
 
 def _frames(path):
-    """48 noisy 40x40 frames whose first pixel holds the frame's index."""
+    """48 noisy 40x40 frames: the first pixel holds the frame's index, the second the
+    initial of the video's name."""
     rng = np.random.default_rng(sum(map(ord, Path(path).name)))
     frames = rng.integers(0, 256, size=(48, 40, 40, 3), dtype=np.uint8)
     frames[:, 0, 0, 0] = np.arange(48)
+    frames[:, 0, 0, 1] = ord(Path(path).name[0])
     return frames
 
 
 def _detector(seen):
-    """Finds the driver top left in frame 8, nobody confident in 24, bottom right in 40."""
+    """Finds the driver small at the top left in frame 8, nobody confident in 24, and
+    larger at the bottom right in 40. In video ``c`` the driver fills frame 40."""
     found = {
         8: [[0, 0, 10, 10, 0.9, 0], [0, 0, 40, 40, 0.9, 2]],
         24: [[0, 0, 40, 40, 0.4, 0]],
-        40: [[30, 30, 40, 40, 0.8, 0]],
+        40: [[20, 20, 40, 40, 0.8, 0]],
     }
 
     def detect(frame):
         index = int(frame[0, 0, 0])
         seen.append(index)
+        if chr(int(frame[0, 0, 1])) == "c" and index == 40:
+            return np.array([[0, 0, 40, 40, 0.9, 0]], dtype=np.float32)
         return np.array(found.get(index, []), dtype=np.float32).reshape(-1, 6)
 
     return detect
@@ -89,7 +94,7 @@ def test_a_box_is_clipped_to_the_frame():
     assert largest_person(detections, width=100, height=100) == (0.0, 0.0, 1.0, 0.5)
 
 
-def test_the_region_joins_the_driver_found_in_the_middle_of_each_clip(videos):
+def test_the_region_is_the_largest_crop_of_each_video_not_every_box(videos):
     seen = []
     content = calibrate_region(
         videos, _detector(seen), reference_geometry(), progress=lambda _: None
@@ -97,9 +102,23 @@ def test_the_region_joins_the_driver_found_in_the_middle_of_each_clip(videos):
     record = content["calibration"]
 
     assert seen == [8, 24, 40] * 2
-    assert torch.tensor(content["region"]["prior"]).nonzero().flatten().tolist() == [0, 15]
-    assert (record["clips"], record["detected"], record["area"]) == (6, 4, 2 / 16)
+    # The bottom-right quarter only: joining every box would add the top-left cell.
+    assert torch.tensor(content["region"]["prior"]).nonzero().flatten().tolist() == [
+        10, 11, 14, 15
+    ]
+    assert (record["clips"], record["detected"], record["area"]) == (6, 4, 4 / 16)
+    assert record["box"] == [0.5, 0.5, 1.0, 1.0]
     assert [video["detected"] for video in record["videos"]] == [2, 2]
+    assert [video["crop"] for video in record["videos"]] == [[0.5, 0.5, 1.0, 1.0]] * 2
+
+
+def test_a_video_unlike_the_rest_does_not_stretch_the_region(videos):
+    (videos / "c.mp4").write_bytes(b"c")
+    content = calibrate_region(videos, _detector([]), reference_geometry(), progress=lambda _: None)
+
+    assert [video["crop"] for video in content["calibration"]["videos"]][-1] == [0, 0, 1, 1]
+    assert content["calibration"]["box"] == [0.5, 0.5, 1.0, 1.0]
+    assert content["calibration"]["area"] == 4 / 16
 
 
 def test_region_detection_spreads_its_clips_over_each_video(videos):
@@ -174,7 +193,7 @@ def test_the_region_command_writes_the_region_and_draws_it(
     arguments = ["region", "--videos", str(videos), "--detector", "yolo26s.pt", "--out", str(out)]
 
     assert main(arguments) == 0
-    assert "#...\n....\n....\n...#" in capsys.readouterr().out
+    assert "....\n....\n..##\n..##" in capsys.readouterr().out
     assert json.loads(out.read_text(encoding="utf-8"))["calibration"]["detector"] == {
         "name": "fake"
     }

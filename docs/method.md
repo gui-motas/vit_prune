@@ -163,10 +163,14 @@ being correctly ignored.
 A prior encodes where the camera was installed, not a property of the method. Use
 `TokenSelection` to look at a real frame first.
 
-**The driver region takes the band from data instead.** `vitprune region` runs a COCO
-person detector (YOLO26s, with the rule of the AI City preprocessing: person above
-0.5, largest box) on the middle frame of every calibration clip and joins the boxes on
-the grid.
+**The driver region takes the band from data instead.** `vitprune region` follows the
+AI City preprocessing, which crops each video to the largest confident person box in it
+(COCO person above 0.5). It runs a COCO detector (YOLO26s) on the middle frame of every
+calibration clip, keeps each video's largest box as that video's crop, and takes the
+median of the crops, coordinate by coordinate, as the region: one rectangle, like the
+crops the downstream model was trained on.
+Joining every box instead fails with a dashboard camera: the driver fills about 40% of the
+frame and moves, and the union over 16 calibration videos covered 91% of the frame.
 Positions inside get weight 1, the rest 0: the slots of each slice go first to the
 region, by score, and outside tokens only take what is left, still merging into kept
 ones. The budget statistics stay on the whole grid, so the region changes which tokens

@@ -36,8 +36,9 @@ since the budget depends on the content; `drift` compares them on `--clips` clip
 Both spread their clips evenly over every video in `--videos`.
 
 `region` runs a COCO person detector on the middle frame of every calibration clip, with
-the rule of the AI City preprocessing, and writes the grid positions the driver
-occupied. `--detector` takes the weights of any detector Ultralytics loads, such as
+the rule of the AI City preprocessing: each video's crop is its largest confident person
+box, and the region is the median of the crops. `--detector` takes the weights of any
+detector Ultralytics loads, such as
 `yolo26s.pt`; it needs the `region` extra, not the VideoMAE source. `--device` takes
 `cuda`, `cuda:N` or `cpu`; `--clips-per-video` works as in `calibrate`.
 `--region region.json` then applies it in `drift`, `run` and `extract`; it requires
@@ -56,8 +57,9 @@ No command here recognises actions directly: `evaluate` invokes the external mod
 
 - `calibrate`: the policy file, with the policy, its version and the calibration
   videos, clip count, cut, sampling and checkpoint identity.
-- `region`: the region file, with the grid, the region and, per calibration video,
-  how many clips found the driver, plus the detection rule and the detector weights.
+- `region`: the region file, with the grid, the region, its box and, per calibration
+  video, how many clips found the driver and the crop, plus the detection rule and the
+  detector weights.
 - `run`: `VIDEO.npz`, `report.json`, `manifest.json`.
 - `extract`: one `VIDEO.npz` per video and `manifest.json`. With a policy, the
   manifest records the policy and, per video, each clip's tokens, regime, redundancy

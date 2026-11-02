@@ -147,7 +147,9 @@ vitprune evaluate --features features/adaptive-region ... --out runs/adaptive-re
 Build the region on the calibration videos of the policy, and look at the drawn map
 and the detection rate before going on. A region covering nearly the whole frame has
 nothing to exclude; a rate well below 100% means the detector misses the driver with
-this camera. On the AI City dashboard footage, YOLO26n scored drivers half hidden by
+this camera. On the AI City dashboard footage the driver is close to the camera: the
+crops cover 43% to 76% of the frame, and the region about 60%, so the region can only
+exclude the roof and the side edges. YOLO26n scored drivers half hidden by
 the wheel or in a hood below 0.5 and an empty passenger seat above it, which put the
 seat in the region; YOLO26s found the driver in all 27 frames checked.
 
