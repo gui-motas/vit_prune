@@ -190,12 +190,7 @@ def _run_single(args) -> int:
     from vitprune.bench.latency import autocast
     from vitprune.bench.report import EmbeddingSummary, RunReport, TimingSummary, summarise_pruning
     from vitprune.core.encoder import PrunedEncoder, PruningPlan
-    from vitprune.pipeline.extraction import (
-        FEATURE_KEY,
-        encode_clips,
-        encode_clips_with_budget,
-        extraction_settings,
-    )
+    from vitprune.pipeline.extraction import FEATURE_KEY, encode_clips, extraction_settings
     from vitprune.pipeline.provenance import Manifest, SourceFile
     from vitprune.pipeline.video import iter_clips
 
@@ -228,15 +223,9 @@ def _run_single(args) -> int:
 
     read, sample = [0.0], []
     started = time.perf_counter()
-    budget = None
-    if plan.budget is not None:
-        embeddings, budget = encode_clips_with_budget(
-            encoder, stream(read, sample), args.batch, args.device, args.precision
-        )
-    else:
-        embeddings = encode_clips(
-            encoder, stream(read, sample), args.batch, args.device, args.precision
-        )
+    embeddings, budget = encode_clips(
+        encoder, stream(read, sample), args.batch, args.device, args.precision
+    )
     read_seconds = read[0]
     encode_seconds = time.perf_counter() - started - read_seconds
     clip_count = int(embeddings.shape[0])

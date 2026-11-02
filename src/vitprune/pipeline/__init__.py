@@ -17,11 +17,7 @@ from vitprune.pipeline.checkpoint import (
     read_weights,
 )
 from vitprune.pipeline.evaluation import DownstreamModel, EvaluationRequest, evaluate
-from vitprune.pipeline.extraction import (
-    encode_clips,
-    encode_clips_with_budget,
-    extract_folder,
-)
+from vitprune.pipeline.extraction import encode_clips, extract_folder
 from vitprune.pipeline.provenance import Manifest, SourceFile, read_manifest
 from vitprune.pipeline.video import (
     clip_span,
@@ -41,7 +37,6 @@ __all__ = [
     "clip_span",
     "disable_activation_checkpointing",
     "encode_clips",
-    "encode_clips_with_budget",
     "evaluate",
     "extract_folder",
     "find_videos",

@@ -86,7 +86,7 @@ def extract_folder(
     for position, video in enumerate(found, start=1):
         moment = time.time()
         clips = (clip for _, clip in iter_clips(video, encoder.geometry, stride, frame_step))
-        embeddings, budget = _encode(encoder, clips, batch, device, precision)
+        embeddings, budget = encode_clips(encoder, clips, batch, device, precision)
         np.savez(destination / f"{video.stem}.npz", **{FEATURE_KEY: embeddings})
 
         elapsed = time.time() - moment
@@ -135,51 +135,18 @@ def encode_clips(
     batch: int = 8,
     device: str = "cuda",
     precision: str = "fp16",
-) -> np.ndarray:
+) -> tuple[np.ndarray, dict[str, list] | None]:
     """Run the clips through the encoder in batches.
 
     ``clips`` is a tensor of clips or any iterable of single clips, such as
     :func:`vitprune.pipeline.video.iter_clips`, so a long video never has to be in
     memory at once.
-    """
-    return _encode(encoder, clips, batch, device, precision)[0]
-
-
-@torch.no_grad()
-def encode_clips_with_budget(
-    encoder: PrunedEncoder,
-    clips: torch.Tensor | Iterable[torch.Tensor],
-    batch: int = 8,
-    device: str = "cuda",
-    precision: str = "fp16",
-) -> tuple[np.ndarray, dict[str, list]]:
-    """Run the clips in batches and report what the adaptive budget decided for each.
 
     Returns:
-        The embeddings, and lists of tokens, regime, redundancy and motion, one entry
-        per clip in order.
+        The embeddings, ``[clips, embed_dim]`` in single precision, and what the
+        adaptive budget decided: lists of tokens, regime, redundancy and motion, one
+        entry per clip in order; ``None`` for a plan that prunes nothing.
     """
-    if encoder.plan.budget is None:
-        raise ValueError("only an adaptive plan decides a budget per clip")
-    return _encode(encoder, clips, batch, device, precision)
-
-
-def _batches(clips, size: int):
-    if isinstance(clips, torch.Tensor):
-        for start in range(0, clips.shape[0], size):
-            yield clips[start : start + size]
-        return
-    pending = []
-    for clip in clips:
-        pending.append(clip)
-        if len(pending) == size:
-            yield torch.stack(pending)
-            pending = []
-    if pending:
-        yield torch.stack(pending)
-
-
-def _encode(encoder, clips, batch, device, precision) -> tuple[np.ndarray, dict | None]:
     _validate_encoding(batch, precision)
     adaptive = encoder.plan.prunes
     pieces = []
@@ -204,6 +171,21 @@ def _encode(encoder, clips, batch, device, precision) -> tuple[np.ndarray, dict 
     if not pieces:
         raise ValueError("at least one clip is needed to encode")
     return torch.cat(pieces).numpy().astype(np.float32), record if adaptive else None
+
+
+def _batches(clips, size: int):
+    if isinstance(clips, torch.Tensor):
+        for start in range(0, clips.shape[0], size):
+            yield clips[start : start + size]
+        return
+    pending = []
+    for clip in clips:
+        pending.append(clip)
+        if len(pending) == size:
+            yield torch.stack(pending)
+            pending = []
+    if pending:
+        yield torch.stack(pending)
 
 
 def _build_manifest(
