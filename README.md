@@ -32,8 +32,9 @@ features = encoder.encode(clips)  # instead of backbone.forward_features(clips)
 ## Installation
 
 ```bash
-pip install vitprune               # the method
-pip install "vitprune[pipeline]"   # plus video reading and the evaluation driver
+pip install vitprune                      # the method
+pip install "vitprune[pipeline]"          # plus video reading and the evaluation driver
+pip install "vitprune[pipeline,region]"   # plus the person detector of vitprune region
 ```
 
 For this local checkout, use `pip install -e ".[pipeline,dev]"`. The commands above
@@ -104,7 +105,7 @@ an incomplete report with `ok=False`; it cannot approve behavioural compatibilit
 |---|---|---|
 | `vitprune.core` | the method: geometry, scoring, merging, attention, encoder | numpy, torch |
 | `vitprune.bench` | measurement: cost model, drift, latency, reports | core, numpy, torch |
-| `vitprune.pipeline` | application glue: video I/O, checkpoints, extraction, evaluation, CLI | opencv, PyYAML |
+| `vitprune.pipeline` | application glue: video I/O, checkpoints, extraction, driver region, evaluation, CLI | opencv, PyYAML; ultralytics for the region |
 
 `core` never imports from `bench` or `pipeline`. A test enforces this, so the library
 stays installable on its own.
@@ -112,16 +113,18 @@ stays installable on its own.
 ## Command line
 
 The base installation registers `vitprune`; video reading and evaluation require
-the `pipeline` extra. The CLI uses the Giant geometry; Python callers choose theirs.
+the `pipeline` extra, and `region` the `region` extra. The CLI uses the Giant
+geometry; Python callers choose theirs.
 
 ```bash
 vitprune cost      --tokens 256 512 768             # analytic estimate, no GPU needed
 vitprune check     --weights w.pth --model-source /path --device cpu
 vitprune calibrate --videos calibration/ --weights w.pth --model-source /path --out policy.json
+vitprune region    --videos calibration/ --detector yolo26s.pt --out region.json
 vitprune latency   --videos data/ --weights w.pth --model-source /path --policy policy.json
 vitprune drift     --videos data/ --weights w.pth --model-source /path --policy policy.json
 vitprune run       --video clip.mp4 --weights w.pth --model-source /path --policy policy.json
-vitprune extract   --videos data/ --weights w.pth --model-source /path --policy policy.json --out feats/
+vitprune extract   --videos data/ --weights w.pth --model-source /path --policy policy.json --region region.json --out feats/
 vitprune evaluate  --features feats/ --downstream-project /path --downstream-config config.yaml --downstream-weights best.pth --out runs/eval
 ```
 
