@@ -47,7 +47,7 @@ vitprune calibrate --videos data/calibration --weights w.pth --model-source /pat
 Fixes the budget: the reference values for redundancy and motion, and the thresholds
 between regimes. **Calibration videos must not be part of the evaluation**, and the
 policy is frozen from here on: the file is never overwritten, and a policy is refused
-under another cut or frame step. Use the stride, frame step and precision of the
+under another cut, frame step or checkpoint. Use the stride, frame step and precision of the
 extraction.
 
 Needs: unlabelled videos from the same camera setup. Only the blocks up to the cut run.

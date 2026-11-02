@@ -24,7 +24,7 @@ The method. Installable and usable on its own.
 | Module | Owns |
 |---|---|
 | `geometry` | all token grid arithmetic, plus named constructors per backbone family |
-| `protocols` | the backbone contract, as a Protocol a type checker can verify |
+| `protocols` | the backbone contract: the required and optional attributes, defined once |
 | `compat` | `check_backbone`: structure and behaviour verification before use |
 | `scoring` | uniqueness and motion, combined into the score that decides survival |
 | `statistics` | per-clip redundancy and motion, the inputs for deciding how many tokens a clip keeps |
@@ -135,10 +135,12 @@ dense; a plan without a budget is the dense path. Encoder construction checks ac
 depth, freezes the shared backbone and sets eval mode. The probe does not permanently
 change that state. The full interface is in [contracts.md](contracts.md).
 
-Extraction refuses duplicate video stems and pre-existing target features. Manifest
+Extraction refuses duplicate video stems and pre-existing target features, and resumes
+an interrupted run of the same settings from `manifest.partial.json`. Manifest
 schema 2 records prior values, complete geometry and SHA-256 fingerprints.
-Evaluation writes a separate record, retaining the prepared configuration and exit
-status. Old manifests can still be read, but absent metadata is not reconstructed.
+Evaluation writes a separate record, retaining the prepared configuration, the
+downstream output and exit status, and refuses a folder already evaluated. Old
+manifests can still be read, but absent metadata is not reconstructed.
 
 ## Test layout
 

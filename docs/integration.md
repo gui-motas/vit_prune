@@ -71,8 +71,8 @@ backbone. It is also why the contract lists parts rather than an entry point.
 A backbone exposing only `forward()` cannot be driven. Refactoring it to expose
 `blocks` is the prerequisite.
 
-The contract is stated as a Protocol in `vitprune.core.protocols`, so a type checker
-can verify it.
+The contract is defined once in `vitprune.core.protocols`, and `check_backbone`
+reports which required attribute is missing.
 
 ## Three checks, in order
 
@@ -161,7 +161,7 @@ extraction manifest records the count each clip actually kept.
 Calibrate once per camera setup. The reference values describe what is much or little
 redundancy and motion for the footage they were measured on; a different mounting or
 framing shifts both. A different checkpoint, cut, geometry or frame step changes the
-statistics too, and a policy file refuses a different cut or frame step.
+statistics too, and a policy file refuses a different cut, frame step or checkpoint.
 
 ## Installing only what you need
 
