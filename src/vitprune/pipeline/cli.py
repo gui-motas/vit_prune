@@ -159,9 +159,9 @@ def _run_drift(args) -> int:
         raise ValueError("clips must be positive")
     if not args.policy:
         raise ValueError("drift compares the adaptive budget against the dense path; pass --policy")
-    backbone = _load_backbone(args)
     geometry = ClipGeometry.videomae_giant()
     plan = _plan_from(args, geometry)
+    backbone = _load_backbone(args)
     clips = gather_clips(args.videos, geometry, args.stride, args.frame_step, args.clips)
 
     print(RULE)
@@ -306,9 +306,9 @@ def _run_extract(args) -> int:
     from vitprune.core.encoder import PrunedEncoder
     from vitprune.pipeline.extraction import extract_folder
 
-    backbone = _load_backbone(args)
     geometry = ClipGeometry.videomae_giant()
     plan = _plan_from(args, geometry)
+    backbone = _load_backbone(args)
 
     print(RULE)
     print(f"{plan.describe()} | stride {args.stride} | precision {args.precision}")
@@ -434,13 +434,23 @@ def _plan_from(args, geometry: ClipGeometry):
     from vitprune.core.priors import top_rows_prior
     from vitprune.pipeline.calibration import read_policy
 
-    prior = top_rows_prior(geometry.grid_size, args.prior_top_rows, args.prior_weight)
     if not args.policy:
+        options = {
+            "--prior-top-rows": args.prior_top_rows,
+            "--motion-weight": args.motion_weight is not None,
+            "--size-biased-attention": args.size_biased_attention,
+        }
+        given = [name for name, value in options.items() if value]
+        if given:
+            raise ValueError(f"{', '.join(given)} only shape what a policy prunes; pass --policy")
         return PruningPlan.dense()
     plan = PruningPlan(
         prune_layer=args.prune_layer,
-        motion_weight=args.motion_weight,
-        spatial_prior=prior if args.prior_top_rows else None,
+        motion_weight=0.5 if args.motion_weight is None else args.motion_weight,
+        spatial_prior=(
+            top_rows_prior(geometry.grid_size, args.prior_top_rows, args.prior_weight)
+            if args.prior_top_rows else None
+        ),
         size_biased_attention=args.size_biased_attention,
         budget=read_policy(args.policy, args.prune_layer, args.frame_step),
     )
@@ -492,7 +502,6 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--motion-weight",
         type=float,
-        default=0.5,
         help="0 uses uniqueness only, 1 uses motion only (default: 0.5)",
     )
     parser.add_argument(

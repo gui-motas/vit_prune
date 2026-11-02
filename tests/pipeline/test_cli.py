@@ -88,6 +88,17 @@ def test_extract_requires_weights_and_a_model_source(capsys):
     assert "--weights" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "option", [["--prior-top-rows", "4"], ["--motion-weight", "0.3"], ["--size-biased-attention"]]
+)
+def test_pruning_options_without_a_policy_are_refused(option, capsys):
+    """Without a policy nothing is pruned: the option would be dropped and the dense
+    baseline written under its name. Refused before any model is loaded."""
+    command = ["extract", "--weights", "w", "--model-source", "s", "--videos", "x", "--out", "y"]
+    assert main([*command, *option]) == 2
+    assert "pass --policy" in capsys.readouterr().err
+
+
 def test_run_requires_a_video(capsys):
     with pytest.raises(SystemExit):
         main(["run", "--weights", "w", "--model-source", "s"])
