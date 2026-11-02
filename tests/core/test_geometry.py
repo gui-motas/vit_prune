@@ -9,7 +9,6 @@ def test_giant_defaults_match_the_published_grid():
     assert g.tokens_per_slice == 256
     assert g.temporal_slices == 8
     assert g.num_tokens == 2048
-    assert g.head_dim == 88
 
 
 def test_large_has_a_coarser_grid_than_giant():
@@ -17,13 +16,7 @@ def test_large_has_a_coarser_grid_than_giant():
 
 
 def test_image_geometry_has_a_single_temporal_slice():
-    g = ClipGeometry.image_vit(224, 16, 768, 12, 12)
-    assert g.temporal_slices == 1
-    assert not g.has_temporal_axis
-
-
-def test_video_geometry_reports_a_temporal_axis():
-    assert ClipGeometry.videomae_giant().has_temporal_axis
+    assert ClipGeometry.image_vit(224, 16, 768, 12, 12).temporal_slices == 1
 
 
 def test_input_shape_follows_the_requested_batch():

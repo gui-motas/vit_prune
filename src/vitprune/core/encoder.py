@@ -269,8 +269,8 @@ class PrunedEncoder(nn.Module):
         """Tokens kept per slice by each clip, and the record of the decision."""
         budget = self.plan.budget
         statistics = clip_statistics(grid)
+        tokens = budget.tokens(statistics)
         regimes = budget.regimes(statistics)
-        tokens = torch.tensor(budget.levels, device=regimes.device)[regimes]
         return tokens // self.geometry.temporal_slices, ClipBudget(tokens, regimes, statistics)
 
     @staticmethod

@@ -64,21 +64,6 @@ def read_frames(path: str | Path, start: int = 0) -> Iterator[np.ndarray]:
         capture.release()
 
 
-def read_video(path: str | Path) -> np.ndarray:
-    """Read every frame of a video file into memory.
-
-    Returns:
-        ``[frames, height, width, 3]`` in RGB, values from 0 to 255.
-
-    A few minutes of 1080p take tens of gigabytes this way; the pipeline commands use
-    :func:`iter_clips` instead.
-    """
-    frames = list(read_frames(path))
-    if not frames:
-        raise RuntimeError(f"could not read any frame from {path}")
-    return np.stack(frames)
-
-
 def frame_count(path: str | Path) -> int:
     """The frame count the container declares, without decoding.
 
@@ -103,53 +88,6 @@ def find_videos(folder: str | Path) -> list[Path]:
     return sorted(p for p in folder.rglob("*") if p.suffix.lower() in VIDEO_SUFFIXES)
 
 
-def to_clips(
-    frames: np.ndarray,
-    geometry: ClipGeometry | None = None,
-    stride: int = 16,
-    frame_step: int = 2,
-) -> torch.Tensor:
-    """Split a frame sequence into the clips the backbone expects.
-
-    Args:
-        frames: ``[frames, height, width, 3]``, values from 0 to 255.
-        geometry: defines frames per clip and image size.
-        stride: frames between the start of consecutive clips.
-        frame_step: take every ``frame_step`` frames within a clip.
-
-    Returns:
-        ``[clips, 3, frames_per_clip, side, side]``, already normalised.
-
-    Videos shorter than one clip are not discarded: the last frame is repeated to
-    fill. Dropping them would lose the short examples, which are often the difficult
-    ones.
-    """
-    geometry = geometry or ClipGeometry.videomae_giant()
-    if frames.ndim != 4 or frames.shape[-1] != 3:
-        raise ValueError(f"expected [frames, height, width, 3], got {tuple(frames.shape)}")
-    if stride < 1:
-        raise ValueError(f"stride must be at least 1, got {stride}")
-    if frame_step < 1:
-        raise ValueError(f"frame_step must be at least 1, got {frame_step}")
-
-    total = frames.shape[0]
-    if total == 0:
-        raise ValueError("the video has no frames")
-
-    normalised = _normalise(frames, geometry.image_size)
-    span = clip_span(geometry, frame_step)
-    starts = _clip_starts(total, span, stride)
-
-    clips = []
-    for start in starts:
-        picked = [
-            min(start + offset * frame_step, total - 1)
-            for offset in range(geometry.frames_per_clip)
-        ]
-        clips.append(normalised[picked].permute(1, 0, 2, 3))
-    return torch.stack(clips)
-
-
 def clip_span(geometry: ClipGeometry | None = None, frame_step: int = 2) -> int:
     """How many video frames one clip spans.
 
@@ -158,20 +96,6 @@ def clip_span(geometry: ClipGeometry | None = None, frame_step: int = 2) -> int:
     """
     geometry = geometry or ClipGeometry.videomae_giant()
     return geometry.frames_per_clip * frame_step
-
-
-def count_clips(
-    total_frames: int,
-    geometry: ClipGeometry | None = None,
-    stride: int = 16,
-    frame_step: int = 2,
-) -> int:
-    """How many clips a video yields, without reading it.
-
-    Useful for estimating cost before spending machine time.
-    """
-    geometry = geometry or ClipGeometry.videomae_giant()
-    return len(_clip_starts(total_frames, clip_span(geometry, frame_step), stride))
 
 
 def iter_clips(
@@ -183,11 +107,14 @@ def iter_clips(
 ) -> Iterator[tuple[int, torch.Tensor]]:
     """Yield ``(start, clip)`` in order, decoding each frame once.
 
-    The same clips as ``to_clips(read_video(path))`` -- same starts, same padding of a
-    video shorter than one clip, same normalisation -- while holding only the frames
-    the next clips need. ``starts`` keeps only those clips, and the reader then jumps
-    over the frames none of them covers; a start that is not a clip of this video is
-    never yielded.
+    A clip starts every ``stride`` frames and takes ``frames_per_clip`` frames
+    ``frame_step`` apart, normalised, as ``[3, frames_per_clip, side, side]``. Only
+    the frames the next clips need are held. A video shorter than one clip still gives
+    one, its last frame repeated to fill: dropping it would lose the short examples,
+    which are often the difficult ones.
+
+    ``starts`` keeps only those clips, and the reader then jumps over the frames none
+    of them covers; a start that is not a clip of this video is never yielded.
     """
     geometry = geometry or ClipGeometry.videomae_giant()
     _check_sampling(stride, frame_step)

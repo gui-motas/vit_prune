@@ -21,18 +21,14 @@ from vitprune.pipeline.extraction import (
     encode_clips,
     encode_clips_with_budget,
     extract_folder,
-    extract_video,
 )
 from vitprune.pipeline.provenance import Manifest, SourceFile, read_manifest
 from vitprune.pipeline.video import (
     clip_span,
-    count_clips,
     find_videos,
     gather_clips,
     iter_clips,
     read_frames,
-    read_video,
-    to_clips,
 )
 
 __all__ = [
@@ -43,13 +39,11 @@ __all__ = [
     "SourceFile",
     "calibrate_videos",
     "clip_span",
-    "count_clips",
     "disable_activation_checkpointing",
     "encode_clips",
     "encode_clips_with_budget",
     "evaluate",
     "extract_folder",
-    "extract_video",
     "find_videos",
     "gather_clips",
     "install_weights",
@@ -58,8 +52,6 @@ __all__ = [
     "read_frames",
     "read_manifest",
     "read_policy",
-    "read_video",
     "read_weights",
-    "to_clips",
     "write_policy",
 ]

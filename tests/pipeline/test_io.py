@@ -14,12 +14,10 @@ from vitprune.pipeline.checkpoint import (
 )
 from vitprune.pipeline.video import (
     clip_span,
-    count_clips,
     find_videos,
     gather_clips,
     iter_clips,
     spread_starts,
-    to_clips,
 )
 
 
@@ -113,22 +111,34 @@ def _frames(total: int, side: int = 40) -> np.ndarray:
     return rng.integers(0, 256, size=(total, side, side, 3), dtype=np.uint8)
 
 
-def test_clips_come_out_in_the_shape_the_backbone_expects():
+def _clips(monkeypatch, frames, geometry=None, **sampling) -> torch.Tensor:
+    """Every clip ``iter_clips`` gives for these frames, stacked."""
+    monkeypatch.setattr(video, "read_frames", _reader(frames))
+    clips = iter_clips("x.mp4", geometry or reference_geometry(), **sampling)
+    return torch.stack([clip for _, clip in clips])
+
+
+def _whole_video_clips(frames, g, stride, step) -> torch.Tensor:
+    """The clips built the obvious way, from every frame at once."""
+    span, total = clip_span(g, step), len(frames)
+    normalised = video._normalise(frames, g.image_size)
+    starts = range(0, total - span + 1, stride) if total >= span else [0]
+    return torch.stack([
+        normalised[[min(s + step * k, total - 1) for k in range(g.frames_per_clip)]]
+        .permute(1, 0, 2, 3)
+        for s in starts
+    ])
+
+
+def test_clips_come_out_in_the_shape_the_backbone_expects(monkeypatch):
     g = reference_geometry()
-    clips = to_clips(_frames(64), g, stride=8)
+    clips = _clips(monkeypatch, _frames(64), g, stride=8)
     assert clips.shape[1:] == (3, g.frames_per_clip, g.image_size, g.image_size)
 
 
-def test_a_larger_stride_yields_fewer_clips():
-    g = reference_geometry()
-    assert (
-        to_clips(_frames(128), g, stride=16).shape[0] < to_clips(_frames(128), g, stride=8).shape[0]
-    )
-
-
-def test_doubling_the_stride_roughly_halves_the_clip_count():
-    g = reference_geometry()
-    assert abs(count_clips(1000, g, stride=8) / count_clips(1000, g, stride=16) - 2.0) < 0.05
+def test_a_larger_stride_yields_fewer_clips(monkeypatch):
+    frames = _frames(128)
+    assert len(_clips(monkeypatch, frames, stride=16)) < len(_clips(monkeypatch, frames, stride=8))
 
 
 def test_a_clip_spans_twice_the_frames_with_step_two():
@@ -137,69 +147,49 @@ def test_a_clip_spans_twice_the_frames_with_step_two():
     assert clip_span(g, frame_step=2) == 32
 
 
-def test_the_clip_still_holds_the_same_frame_count_at_any_step():
+def test_the_clip_still_holds_the_same_frame_count_at_any_step(monkeypatch):
     """Covering more time costs nothing extra: the backbone always gets the same
     number of frames."""
-    g = reference_geometry()
-    consecutive = to_clips(_frames(64), g, stride=8, frame_step=1)
-    spaced = to_clips(_frames(64), g, stride=8, frame_step=2)
+    g, frames = reference_geometry(), _frames(64)
+    consecutive = _clips(monkeypatch, frames, g, stride=8, frame_step=1)
+    spaced = _clips(monkeypatch, frames, g, stride=8, frame_step=2)
     assert consecutive.shape[2] == spaced.shape[2] == g.frames_per_clip
 
 
-def test_a_larger_frame_step_yields_fewer_clips():
-    g = reference_geometry()
-    assert count_clips(200, g, stride=8, frame_step=2) < count_clips(200, g, stride=8, frame_step=1)
+def test_a_larger_frame_step_yields_fewer_clips(monkeypatch):
+    frames = _frames(200)
+    spaced = _clips(monkeypatch, frames, stride=8, frame_step=2)
+    assert len(spaced) < len(_clips(monkeypatch, frames, stride=8, frame_step=1))
 
 
-def test_the_frame_step_takes_every_other_frame():
-    g = reference_geometry()
+def test_the_frame_step_takes_every_other_frame(monkeypatch):
     frames = np.zeros((32, 40, 40, 3), dtype=np.uint8)
     for i in range(32):
         frames[i] = i * 8
 
-    clip = to_clips(frames, g, stride=8, frame_step=2)[0]
+    clip = _clips(monkeypatch, frames, stride=8, frame_step=2)[0]
     brightness = clip[0, :, 0, 0]
 
     steps = (brightness[1:] - brightness[:-1]).abs()
     assert torch.allclose(steps, steps[0].expand_as(steps), atol=1e-4)
 
 
-def test_a_video_shorter_than_one_clip_still_yields_one():
+def test_a_video_shorter_than_one_clip_still_yields_one(monkeypatch):
     """Short videos tend to be the hard cases; dropping them hides the problem."""
-    assert to_clips(_frames(3), reference_geometry(), stride=8).shape[0] == 1
-
-
-def test_a_video_with_no_frames_is_rejected():
-    with pytest.raises(ValueError, match="no frames"):
-        to_clips(np.zeros((0, 10, 10, 3), dtype=np.uint8), reference_geometry())
-
-
-def test_a_wrong_input_shape_is_rejected():
-    with pytest.raises(ValueError, match="expected"):
-        to_clips(np.zeros((4, 10, 10), dtype=np.uint8), reference_geometry())
+    assert len(_clips(monkeypatch, _frames(3), stride=8)) == 1
 
 
 @pytest.mark.parametrize("stride,step", [(0, 2), (1, 0)])
-def test_invalid_stride_or_step_is_rejected(stride, step):
+def test_invalid_stride_or_step_is_rejected(monkeypatch, stride, step):
     with pytest.raises(ValueError):
-        to_clips(_frames(64), reference_geometry(), stride=stride, frame_step=step)
+        _clips(monkeypatch, _frames(64), stride=stride, frame_step=step)
 
 
-def test_normalisation_shifts_the_value_range():
+def test_normalisation_shifts_the_value_range(monkeypatch):
     """Raw 0-255 values are not what the backbone was trained on."""
-    clips = to_clips(_frames(32), reference_geometry(), stride=8)
+    clips = _clips(monkeypatch, _frames(32), stride=8)
     assert clips.min() < 0.0
     assert clips.max() < 10.0
-
-
-def test_the_clip_count_matches_what_extraction_produces():
-    g = reference_geometry()
-    frames = _frames(120)
-    for step in (1, 2):
-        assert (
-            count_clips(120, g, stride=5, frame_step=step)
-            == to_clips(frames, g, stride=5, frame_step=step).shape[0]
-        )
 
 
 @pytest.mark.parametrize("total", [3, 15, 16, 23, 24, 64, 71])
@@ -211,7 +201,7 @@ def test_streamed_clips_equal_the_clips_of_the_whole_video(monkeypatch, total, s
     monkeypatch.setattr(video, "read_frames", _reader(frames))
 
     streamed = list(iter_clips("x.mp4", g, stride=stride, frame_step=step))
-    expected = to_clips(frames, g, stride=stride, frame_step=step)
+    expected = _whole_video_clips(frames, g, stride, step)
 
     assert [start for start, _ in streamed] == list(range(0, len(streamed) * stride, stride))
     assert torch.equal(torch.stack([clip for _, clip in streamed]), expected)

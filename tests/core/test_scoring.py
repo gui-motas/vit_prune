@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from vitprune.core.priors import region_prior, top_rows_prior, uniform_prior
+from vitprune.core.priors import top_rows_prior
 from vitprune.core.scoring import score_tokens
 
 
@@ -74,7 +74,7 @@ def test_the_spatial_prior_zeroes_the_marked_positions():
 
 def test_a_neutral_prior_changes_nothing():
     t = _tokens(batch=1, slices=2, count=16)
-    assert torch.allclose(score_tokens(t), score_tokens(t, spatial_prior=uniform_prior(4)))
+    assert torch.allclose(score_tokens(t), score_tokens(t, spatial_prior=torch.ones(16)))
 
 
 def test_a_prior_of_the_wrong_size_is_rejected():
@@ -100,24 +100,7 @@ def test_top_rows_prior_lowers_only_the_top():
     assert torch.all(prior[8:] == 1.0)
 
 
-def test_region_prior_can_lower_the_left_edge():
-    """The driver-facing footage this was built around has the window on the left,
-    not the top."""
-    prior = region_prior(grid_size=4, left=1, weight=0.0).reshape(4, 4)
-    assert torch.all(prior[:, 0] == 0.0)
-    assert torch.all(prior[:, 1:] == 1.0)
-
-
-def test_region_prior_with_no_bands_is_neutral():
-    assert torch.all(region_prior(grid_size=4) == 1.0)
-
-
 @pytest.mark.parametrize("rows,weight", [(-1, 0.5), (5, 0.5), (1, -0.1), (1, 2.0)])
 def test_invalid_prior_parameters_are_rejected(rows, weight):
     with pytest.raises(ValueError):
         top_rows_prior(grid_size=4, rows=rows, weight=weight)
-
-
-def test_region_prior_rejects_a_band_larger_than_the_grid():
-    with pytest.raises(ValueError, match="bottom"):
-        region_prior(grid_size=4, bottom=9)

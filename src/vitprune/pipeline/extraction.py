@@ -129,27 +129,6 @@ def extract_folder(
 
 
 @torch.no_grad()
-def extract_video(
-    encoder: PrunedEncoder,
-    video: str | Path,
-    stride: int = 16,
-    frame_step: int = 2,
-    batch: int = 8,
-    device: str = "cuda",
-    precision: str = "fp16",
-) -> np.ndarray:
-    """Return one embedding per clip for a single video.
-
-    Returns:
-        ``[clips, embed_dim]`` in single precision. Storing at single precision is
-        deliberate: halving the file size saves little and risks introducing a
-        difference that would later be mistaken for an effect of the method.
-    """
-    clips = (clip for _, clip in iter_clips(video, encoder.geometry, stride, frame_step))
-    return encode_clips(encoder, clips, batch, device, precision)
-
-
-@torch.no_grad()
 def encode_clips(
     encoder: PrunedEncoder,
     clips: torch.Tensor | Iterable[torch.Tensor],

@@ -77,9 +77,9 @@ an inspection convention; absolute positional vectors already travel with tokens
 ## Application limits
 
 The pipeline commands read videos a frame at a time and hold only the frames the
-next clips need, so a long or high-resolution video is not limited by memory;
-`read_video` still loads a whole file for callers who want it. Checkpoints are
-memory-mapped, so an optimiser state stored alongside the weights is never read.
+next clips need, so a long or high-resolution video is not limited by memory.
+Checkpoints are memory-mapped, so an optimiser state stored alongside the weights is
+never read.
 `batch` limits the forward batch. Video metadata/FPS is not inferred
 for the downstream model. Callers must match its full temporal protocol.
 The evaluation adapter assumes the external `eval.py CONFIG WEIGHTS --output_csv`

@@ -174,16 +174,6 @@ class ClipGeometry:
         """Tokens in a whole clip. 8 x 256 = 2048."""
         return self.temporal_slices * self.tokens_per_slice
 
-    @property
-    def head_dim(self) -> int:
-        """Width seen by each attention head. 1408 / 16 = 88."""
-        return self.embed_dim // self.heads
-
-    @property
-    def has_temporal_axis(self) -> bool:
-        """False for a single-slice geometry, where the motion term cannot apply."""
-        return self.temporal_slices > 1
-
     def input_shape(self, batch: int = 1) -> tuple[int, int, int, int, int]:
         """Shape the backbone expects: batch, channels, frames, height, width."""
         return (batch, 3, self.frames_per_clip, self.image_size, self.image_size)
