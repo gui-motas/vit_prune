@@ -43,7 +43,7 @@ Nenhum modelo é retreinado: o ViT-Prune só calibra a política e a região.
 | Níveis de tokens por clipe | 256, 512 e 768 de 2048 |
 | Peso do movimento na política | 0,5 |
 | Máscara fixa | 4 linhas do topo com peso 0,15 |
-| Máscara inteligente | maior pessoa com confiança acima de 0,5 no quadro do meio de cada trecho de calibração, unida na grade 16x16 |
+| Máscara inteligente | o recorte do AI City em cada vídeo de calibração (a maior pessoa com confiança acima de 0,5, no quadro do meio de cada trecho); a região é a mediana desses recortes, na grade 16x16 |
 
 ## Ambiente
 
