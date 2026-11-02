@@ -69,6 +69,7 @@ def measure_drift(
     geometry=None,
     device: str = "cpu",
     precision: str = "off",
+    batch: int = 8,
 ) -> DriftReport:
     """Compare the pruned embedding against the dense one, clip by clip.
 
@@ -79,6 +80,7 @@ def measure_drift(
         geometry: the clip geometry; defaults to the Giant.
         device: where to run.
         precision: ``fp16``, ``bf16`` or ``off``.
+        batch: clips per forward pass; each clip's figures do not depend on it.
 
     Returns:
         A :class:`DriftReport`.
@@ -88,6 +90,8 @@ def measure_drift(
     """
     if clips.shape[0] == 0:
         raise ValueError("at least one clip is needed to measure drift")
+    if batch < 1:
+        raise ValueError("batch must be positive")
 
     dense = PrunedEncoder(backbone, geometry, PruningPlan.dense())
     pruned = PrunedEncoder(backbone, geometry, plan)
@@ -95,17 +99,18 @@ def measure_drift(
     cosines: list[float] = []
     distances: list[float] = []
 
-    for index in range(clips.shape[0]):
-        one = clips[index : index + 1].to(device)
+    for start in range(0, clips.shape[0], batch):
+        chunk = clips[start : start + batch].to(device)
         with autocast(device, precision):
-            a = dense.encode(one).float()
-            b = pruned.encode(one).float()
+            a = dense.encode(chunk).float()
+            b = pruned.encode(chunk).float()
         if not torch.isfinite(a).all() or not torch.isfinite(b).all():
             raise ValueError("cannot measure drift of non-finite embeddings")
-        if torch.norm(a) == 0 or torch.norm(b) == 0:
+        norms = a.norm(dim=-1)
+        if (norms == 0).any() or (b.norm(dim=-1) == 0).any():
             raise ValueError("cannot measure drift of zero-norm embeddings")
-        cosines.append(F.cosine_similarity(a, b, dim=-1).item())
-        distances.append((torch.norm(a - b) / torch.norm(a)).item())
+        cosines += F.cosine_similarity(a, b, dim=-1).tolist()
+        distances += ((a - b).norm(dim=-1) / norms).tolist()
 
     return _summarise(cosines, distances)
 

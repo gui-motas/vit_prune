@@ -68,6 +68,14 @@ def test_the_report_counts_the_clips(backbone, geometry, clips):
     assert measure_drift(backbone, clips, PruningPlan.dense(), geometry).clips == 6
 
 
+def test_batching_the_clips_changes_no_figure(backbone, geometry, clips, pruned):
+    """Each clip's embedding depends on that clip alone, whatever else shares its batch."""
+    one = measure_drift(backbone, clips, pruned(), geometry, batch=1)
+    four = measure_drift(backbone, clips, pruned(), geometry, batch=4)
+    for name, value in vars(one).items():
+        assert getattr(four, name) == pytest.approx(value, abs=1e-5)
+
+
 def test_the_worst_case_is_never_better_than_the_mean(backbone, geometry, clips, pruned):
     """The mean hides the bad cases, which is why the extremes are reported."""
     r = measure_drift(backbone, clips, pruned(), geometry)
