@@ -139,7 +139,6 @@ automatically check dense equivalence before running. Without `--policy`, `run` 
 | [`docs/experiments.md`](docs/experiments.md) | measuring, and reading the results |
 | [`docs/contracts.md`](docs/contracts.md) | supported shapes, state and validation |
 | [`docs/operations.md`](docs/operations.md) | current CLI, outputs and provenance |
-| [`docs/history.md`](docs/history.md) | historical scripts and reported results |
 | [`docs/validation.md`](docs/validation.md) | local test results and remaining validation limits |
 
 ## Tests
