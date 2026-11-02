@@ -5,7 +5,7 @@ imports nothing from `bench` or `pipeline`**, and a test enforces it.
 
 ```
 pipeline   video decoding, checkpoints, extraction, evaluation, CLI
-   |       needs: opencv, PyYAML
+   |       needs: opencv, PyYAML; ultralytics for the driver region
    v
 bench      cost model, drift, latency, reports
    |       needs: core, numpy, torch

@@ -166,8 +166,9 @@ statistics too, and a policy file refuses a different cut, frame step or checkpo
 ## Installing only what you need
 
 ```bash
-pip install vitprune               # core: numpy and torch
-pip install "vitprune[pipeline]"   # plus video decoding and the evaluation driver
+pip install vitprune                      # core: numpy and torch
+pip install "vitprune[pipeline]"          # plus video decoding and the evaluation driver
+pip install "vitprune[pipeline,region]"   # plus the person detector of vitprune region
 ```
 
 If you already have your own data loading, the base install is enough.
