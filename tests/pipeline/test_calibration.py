@@ -30,7 +30,7 @@ def videos(tmp_path, monkeypatch):
     folder.mkdir()
     for name in ("a.mp4", "b.mp4"):
         (folder / name).write_bytes(name.encode())
-    monkeypatch.setattr(video, "read_frames", lambda path: iter(_frames(path)))
+    monkeypatch.setattr(video, "read_frames", lambda path, start=0: iter(_frames(path)[start:]))
     monkeypatch.setattr(calibration, "frame_count", lambda path: len(_frames(path)))
     return folder
 

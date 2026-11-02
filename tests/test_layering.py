@@ -73,7 +73,7 @@ def test_core_imports_nothing_from_the_rest():
 def test_core_does_not_import_the_optional_dependencies():
     """opencv and yaml belong to the pipeline extra. Importing either from core
     would make a minimal install fail at import time."""
-    optional = {"cv2", "yaml", "decord"}
+    optional = {"cv2", "yaml"}
 
     for module in _modules_of("core"):
         tree = ast.parse(module.read_text(encoding="utf-8"))
@@ -107,7 +107,7 @@ import sys
 sys.path.insert(0, {str(SRC.parent)!r})
 class BlockOptional(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {{'cv2', 'yaml', 'decord'}}:
+        if fullname.split('.')[0] in {{'cv2', 'yaml'}}:
             raise ImportError('optional dependency blocked: ' + fullname)
 sys.meta_path.insert(0, BlockOptional())
 from vitprune import ClipGeometry, PrunedEncoder, PruningPlan, check_backbone

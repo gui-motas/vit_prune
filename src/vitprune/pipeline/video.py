@@ -25,6 +25,7 @@ like an effect of pruning.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -41,21 +42,26 @@ CHANNEL_STD = (0.229, 0.224, 0.225)
 VIDEO_SUFFIXES = frozenset({".mp4", ".avi", ".mov", ".mkv", ".webm"})
 
 
-def read_frames(path: str | Path) -> Iterator[np.ndarray]:
-    """Yield the frames of a video file one at a time, in order.
+def read_frames(path: str | Path, start: int = 0) -> Iterator[np.ndarray]:
+    """Yield the frames of a video file one at a time, in order, from frame ``start``.
 
-    Each frame is ``[height, width, 3]`` in RGB, values from 0 to 255. Uses ``decord``
-    when available, since it is considerably faster, and falls back to OpenCV.
+    Each frame is ``[height, width, 3]`` in RGB, values from 0 to 255. Every machine
+    decodes with OpenCV, so the same file gives the same frames everywhere.
     """
-    path = str(path)
+    cv2 = _opencv()
+    capture = cv2.VideoCapture(str(path))
     try:
-        import decord
-    except ImportError:
-        yield from _frames_with_opencv(path)
-        return
-    reader = decord.VideoReader(path, num_threads=2)
-    for index in range(len(reader)):
-        yield reader[index].asnumpy()
+        if start:
+            # shortcut: OpenCV lands on the exact frame in constant-frame-rate files, as in
+            # the AI City footage (checked frame by frame); decode from 0 for variable rate.
+            capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                return
+            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    finally:
+        capture.release()
 
 
 def read_video(path: str | Path) -> np.ndarray:
@@ -78,15 +84,11 @@ def frame_count(path: str | Path) -> int:
 
     Containers can be off by a few frames; use it for planning, not for clip starts.
     """
-    try:
-        import decord
-    except ImportError:
-        cv2 = _opencv()
-        capture = cv2.VideoCapture(str(path))
-        count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        capture.release()
-        return count
-    return len(decord.VideoReader(str(path)))
+    cv2 = _opencv()
+    capture = cv2.VideoCapture(str(path))
+    count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    capture.release()
+    return count
 
 
 def find_videos(folder: str | Path) -> list[Path]:
@@ -179,18 +181,21 @@ def iter_clips(
     frame_step: int = 2,
     starts: Iterable[int] | None = None,
 ) -> Iterator[tuple[int, torch.Tensor]]:
-    """Yield ``(start, clip)`` in order, decoding the video once.
+    """Yield ``(start, clip)`` in order, decoding each frame once.
 
     The same clips as ``to_clips(read_video(path))`` -- same starts, same padding of a
     video shorter than one clip, same normalisation -- while holding only the frames
-    the next clips need. ``starts`` keeps only those clips; a start that is not a clip
-    of this video is never yielded.
+    the next clips need. ``starts`` keeps only those clips, and the reader then jumps
+    over the frames none of them covers; a start that is not a clip of this video is
+    never yielded.
     """
     geometry = geometry or ClipGeometry.videomae_giant()
     _check_sampling(stride, frame_step)
     span = clip_span(geometry, frame_step)
     offsets = [frame_step * k for k in range(geometry.frames_per_clip)]
-    wanted = None if starts is None else set(starts)
+    wanted = None if starts is None else {s for s in starts if s >= 0 and s % stride == 0}
+    if wanted is not None and not wanted:
+        return
 
     def kept(start: int) -> bool:
         return start % stride == 0 and (wanted is None or start in wanted)
@@ -202,7 +207,7 @@ def iter_clips(
 
     frames: dict[int, torch.Tensor] = {}
     count, last = 0, None
-    for index, frame in enumerate(read_frames(path)):
+    for index, frame in _indexed_frames(path, wanted, span):
         count, last = index + 1, frame
         if needed(index):
             frames[index] = _normalise(frame[None], geometry.image_size)[0]
@@ -213,10 +218,28 @@ def iter_clips(
         for done in [f for f in frames if f < oldest]:
             del frames[done]
     if count == 0:
-        raise ValueError("the video has no frames")
+        if wanted is None or 0 in wanted:
+            raise ValueError("the video has no frames")
+        return
     if count < span and kept(0):
         frames[count - 1] = _normalise(last[None], geometry.image_size)[0]
         yield 0, torch.stack([frames[min(offset, count - 1)] for offset in offsets], dim=1)
+
+
+def _indexed_frames(path: str | Path, wanted: set[int] | None, span: int):
+    """``(index, frame)`` for every frame, or for those the wanted clips cover, jumping
+    over the gaps between them."""
+    if wanted is None:
+        yield from enumerate(read_frames(path))
+        return
+    runs: list[list[int]] = []
+    for start in sorted(wanted):
+        if runs and start <= runs[-1][1]:
+            runs[-1][1] = start + span
+        else:
+            runs.append([start, start + span])
+    for first, end in runs:
+        yield from enumerate(islice(read_frames(path, first), end - first), start=first)
 
 
 def spread_starts(
@@ -284,19 +307,6 @@ def _opencv():
         import cv2
     except ImportError as error:
         raise RuntimeError(
-            "reading video requires decord or opencv-python: pip install 'vitprune[pipeline]'"
+            "reading video requires opencv-python: pip install 'vitprune[pipeline]'"
         ) from error
     return cv2
-
-
-def _frames_with_opencv(path: str) -> Iterator[np.ndarray]:
-    cv2 = _opencv()
-    capture = cv2.VideoCapture(path)
-    try:
-        while True:
-            ok, frame = capture.read()
-            if not ok:
-                return
-            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    finally:
-        capture.release()

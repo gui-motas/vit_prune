@@ -33,7 +33,7 @@ def test_extraction_records_the_actual_protocol_and_fingerprints(tmp_path, monke
     definitions.parent.mkdir(parents=True)
     definitions.write_text("# external model", encoding="utf-8")
     frames = np.zeros((32, 32, 32, 3), dtype=np.uint8)
-    monkeypatch.setattr(reader, "read_frames", lambda path: iter(frames))
+    monkeypatch.setattr(reader, "read_frames", lambda path, start=0: iter(frames[start:]))
     folder = tmp_path / "features"
     path = extraction.extract_folder(
         encoder, video, folder, batch=2, device="cpu", precision="off",

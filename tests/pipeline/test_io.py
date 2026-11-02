@@ -207,7 +207,7 @@ def test_streamed_clips_equal_the_clips_of_the_whole_video(monkeypatch, total, s
     """Reading a frame at a time must not change a single value, including the padding
     of a video shorter than one clip."""
     g, frames = reference_geometry(), _frames(total)
-    monkeypatch.setattr(video, "read_frames", lambda path: iter(frames))
+    monkeypatch.setattr(video, "read_frames", _reader(frames))
 
     streamed = list(iter_clips("x.mp4", g, stride=stride, frame_step=step))
     expected = to_clips(frames, g, stride=stride, frame_step=step)
@@ -216,18 +216,61 @@ def test_streamed_clips_equal_the_clips_of_the_whole_video(monkeypatch, total, s
     assert torch.equal(torch.stack([clip for _, clip in streamed]), expected)
 
 
+def _reader(frames, calls=None):
+    """A stand-in for ``read_frames`` that records where each read started."""
+    def read(path, start=0):
+        if calls is not None:
+            calls.append(start)
+        return iter(frames[start:])
+    return read
+
+
 def test_streaming_can_keep_only_some_clips(monkeypatch):
-    g, frames = reference_geometry(), _frames(64)
-    monkeypatch.setattr(video, "read_frames", lambda path: iter(frames))
+    g, frames, calls = reference_geometry(), _frames(64), []
+    monkeypatch.setattr(video, "read_frames", _reader(frames, calls))
 
     streamed = dict(iter_clips("x.mp4", g, stride=8, starts=[8, 40, 41, 999]))
 
     assert sorted(streamed) == [8, 40]
-    assert torch.equal(streamed[40], to_clips(frames, g, stride=8)[5])
+    assert calls == [8, 40], "the frames between the two clips are skipped, not decoded"
+    monkeypatch.setattr(video, "read_frames", _reader(frames))
+    assert torch.equal(streamed[40], dict(iter_clips("x.mp4", g, stride=8))[40])
+
+
+@pytest.mark.parametrize("starts", [[0], [0, 8, 40], [16, 24, 32], [8, 48], [48], []])
+@pytest.mark.parametrize("total", [3, 64])
+def test_jumping_to_some_clips_changes_no_value(monkeypatch, starts, total):
+    """Overlapping, adjacent and distant clips, and the padded clip of a short video."""
+    g, frames = reference_geometry(), _frames(total)
+    monkeypatch.setattr(video, "read_frames", _reader(frames))
+
+    every = dict(iter_clips("x.mp4", g, stride=8))
+    picked = dict(iter_clips("x.mp4", g, stride=8, starts=starts))
+
+    assert sorted(picked) == [s for s in starts if s in every]
+    assert all(torch.equal(clip, every[start]) for start, clip in picked.items())
+
+
+def test_seeking_in_a_real_file_lands_on_the_same_frames(tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    path = tmp_path / "clip.mp4"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 30, (64, 48))
+    if not writer.isOpened():
+        pytest.skip("OpenCV cannot write mp4 here")
+    for frame in _frames(80, side=64)[:, :48]:
+        writer.write(np.ascontiguousarray(frame))
+    writer.release()
+    g = reference_geometry()
+
+    every = dict(iter_clips(path, g, stride=8))
+    picked = dict(iter_clips(path, g, stride=8, starts=[8, 40, 64]))
+
+    assert sorted(picked) == [8, 40, 64]
+    assert all(torch.equal(clip, every[start]) for start, clip in picked.items())
 
 
 def test_a_streamed_video_with_no_frames_is_rejected(monkeypatch):
-    monkeypatch.setattr(video, "read_frames", lambda path: iter([]))
+    monkeypatch.setattr(video, "read_frames", _reader([]))
     with pytest.raises(ValueError, match="no frames"):
         list(iter_clips("x.mp4", reference_geometry()))
 

@@ -1,8 +1,8 @@
 # Pipeline operation
 
 Install the local checkout with `pip install -e ".[pipeline,dev]"`. Base dependencies
-are NumPy and Torch; `pipeline` adds OpenCV and PyYAML. Decord is used if separately
-available. The old `torch` extra no longer exists.
+are NumPy and Torch; `pipeline` adds OpenCV, which decodes every video, and PyYAML.
+The old `torch` extra no longer exists.
 
 ## Commands
 
