@@ -28,8 +28,9 @@ was calibrated with. Use the same stride and precision as the extraction.
 `--policy` selects the adaptive budget in `cost`, `latency`, `drift`, `run` and
 `extract`. Without it, `run` and `extract` produce the dense baseline; `latency` and
 `drift` require it. `cost` without a policy takes the levels from `--tokens` (default
-256 512 768). `latency` times the dense path and the policy on real clips from
-`--videos`, since the budget depends on the content.
+256 512 768). `latency` times the dense path and the policy on `--batch` real clips,
+since the budget depends on the content; `drift` compares them on `--clips` clips.
+Both spread their clips evenly over every video in `--videos`.
 
 `check`, `latency`, `drift`, `run` and `extract` support `--device cpu` and require
 an external Giant backbone exposing `forward_features`. All verify dense equivalence

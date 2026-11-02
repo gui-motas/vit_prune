@@ -250,11 +250,8 @@ def spread_starts(
     frame_step: int = 2,
 ) -> list[int]:
     """``count`` clip starts spread evenly over a video, or all of them if fewer."""
-    if count < 1:
-        raise ValueError("the clip count must be positive")
     geometry = geometry or ClipGeometry.videomae_giant()
-    starts = _clip_starts(total_frames, clip_span(geometry, frame_step), stride)
-    return sorted({starts[round(i)] for i in np.linspace(0, len(starts) - 1, count)})
+    return _spread(_clip_starts(total_frames, clip_span(geometry, frame_step), stride), count)
 
 
 def gather_clips(
@@ -264,20 +261,32 @@ def gather_clips(
     frame_step: int,
     count: int,
 ) -> torch.Tensor:
-    """The first ``count`` clips of a folder of videos, in a fixed order."""
-    if count < 1:
-        raise ValueError("the clip count must be positive")
+    """``count`` clips spread evenly over a folder of videos, in a fixed order.
+
+    The first clips of a folder are a few seconds of one video, not a sample of it.
+    """
     found = find_videos(videos)
     if not found:
         raise FileNotFoundError(f"no video found in {videos}")
+    span = clip_span(geometry, frame_step)
+    every = [(video, start) for video in found
+             for start in _clip_starts(frame_count(video), span, stride)]
+    picked = _spread(every, count)
 
     gathered = []
     for video in found:
-        for _, clip in iter_clips(video, geometry, stride, frame_step):
-            gathered.append(clip)
-            if len(gathered) == count:
-                return torch.stack(gathered)
+        starts = [start for source, start in picked if source == video]
+        if starts:
+            clips = iter_clips(video, geometry, stride, frame_step, starts)
+            gathered += [clip for _, clip in clips]
     return torch.stack(gathered)
+
+
+def _spread(items: list, count: int) -> list:
+    """``count`` items spread evenly over a list, the first and the last included."""
+    if count < 1:
+        raise ValueError("the clip count must be positive")
+    return sorted({items[round(i)] for i in np.linspace(0, len(items) - 1, count)})
 
 
 def _check_sampling(stride: int, frame_step: int) -> None:

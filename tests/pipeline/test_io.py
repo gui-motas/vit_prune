@@ -16,6 +16,7 @@ from vitprune.pipeline.video import (
     clip_span,
     count_clips,
     find_videos,
+    gather_clips,
     iter_clips,
     spread_starts,
     to_clips,
@@ -279,6 +280,22 @@ def test_spread_starts_cover_the_whole_video():
     g = reference_geometry()
     assert spread_starts(64, 3, g, stride=8) == [0, 24, 48]
     assert spread_starts(64, 100, g, stride=8) == list(range(0, 49, 8))
+
+
+def test_gathered_clips_are_spread_over_every_video(tmp_path, monkeypatch):
+    """The first clips of a folder are a few seconds of one video, not a sample of it."""
+    g = reference_geometry()
+    frames = {"a.mp4": _frames(48), "b.mp4": _frames(48)[::-1].copy()}
+    for name in frames:
+        (tmp_path / name).write_bytes(b"")
+    monkeypatch.setattr(video, "read_frames", lambda path, start=0: iter(frames[path.name][start:]))
+    monkeypatch.setattr(video, "frame_count", lambda path: 48)
+
+    gathered = gather_clips(tmp_path, g, stride=8, frame_step=2, count=4)
+
+    picks = [("a.mp4", 0), ("a.mp4", 24), ("b.mp4", 8), ("b.mp4", 32)]
+    expected = [dict(iter_clips(tmp_path / name, g, stride=8))[start] for name, start in picks]
+    assert torch.equal(gathered, torch.stack(expected))
 
 
 def test_weights_load_from_the_legacy_format_too(tmp_path):
