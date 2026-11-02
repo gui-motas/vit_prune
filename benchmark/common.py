@@ -1,7 +1,8 @@
-"""Paths, settings, clip sampling and ground truth shared by the benchmark scripts.
+"""Paths, settings, variants and ground truth shared by the benchmark scripts.
 
-The benchmark evaluates the videos listed in ``evaluate``. Everything that is
-calibrated -- the adaptive policy and the driver region -- comes from
+The benchmark runs every clip of the videos listed in ``evaluate`` through four
+variants: the dense VideoMAE, and ViT-Prune with no mask, with the fixed mask and with
+the smart mask, the driver region. The policy and the region come from
 ``vitprune calibrate`` and ``vitprune region`` run on other videos of the same camera,
 so nothing is ever judged on the footage it was fitted to.
 
@@ -18,15 +19,12 @@ any of them in ``benchmark/settings.json``, for example::
       "ama_config": "D:/AMA/configs/aicity_ego_vitl.yaml",
       "ama_weights": "D:/AMA/ckpt/aicity_ego_vitl_ckpt/best_performance.pth.tar",
       "device": "cuda",
-      "batch": 8,
-      "clips": "all"
+      "batch": 8
     }
 
-``clips`` is ``sample`` (four clips per annotated action, what a CPU can finish in a few
-hours) or ``all`` (every clip of every video, which the AMA needs). ``precision`` is
-``off`` (fp32, as the AI City feature extraction ran), ``fp16`` or ``bf16``.
-``evaluate`` lists the videos under evaluation; none of them may be among the
-calibration videos.
+``precision`` is ``off`` (fp32, as the AI City feature extraction ran), ``fp16`` or
+``bf16``. ``evaluate`` lists the videos under evaluation; none of them may be among
+the calibration videos.
 """
 
 from __future__ import annotations
@@ -54,7 +52,6 @@ DEFAULTS = {
     "device": "cpu",
     "precision": "off",
     "batch": 1,
-    "clips": "sample",
     "evaluate": ["Dashboard_user_id_13522_NoAudio_5", "Dashboard_user_id_13522_NoAudio_7"],
 }
 
@@ -66,8 +63,6 @@ def _settings() -> dict:
     if unknown:
         raise ValueError(f"unknown keys in {path}: {sorted(unknown)}; known: {sorted(DEFAULTS)}")
     settings = {**DEFAULTS, **given}
-    if settings["clips"] not in ("sample", "all"):
-        raise ValueError("clips must be 'sample' or 'all'")
     if settings["precision"] not in ("off", "fp16", "bf16"):
         raise ValueError("precision must be 'off', 'fp16' or 'bf16'")
     return settings
@@ -83,6 +78,10 @@ STRIDE = 16
 FRAME_STEP = 2
 GEOMETRY = ClipGeometry.videomae_giant()
 SPAN = clip_span(GEOMETRY, FRAME_STEP)
+
+#: The pruned variants share one policy, so they keep the same tokens per clip; the
+#: masks only change which ones.
+VARIANTS = ("denso", "vitprune", "vitprune_mascara_fixa", "vitprune_mascara_inteligente")
 
 
 def videos() -> list[Path]:

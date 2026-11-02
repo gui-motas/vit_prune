@@ -1,8 +1,9 @@
 """Run the AMA temporal localizer of the AI City solution on each variant's features.
 
-Needs the features that ``run_inference.py`` writes with ``"clips": "all"``. Run it with
-the Python environment of the AMA project: its ``eval.py`` runs under the same
-interpreter. Writes, under ``results``:
+Needs the features that ``run_inference.py`` writes. Run it with the Python environment
+of the AMA project: its ``eval.py`` runs under the same interpreter, with this folder
+on its path ahead of the installed packages, so that ``nms_1d_cpu.py`` stands in for
+the compiled extension on every machine. Writes, under ``results``:
 
 * ``ama/labels.json`` -- the annotations with the ``subset`` field the AMA loader needs;
 * ``ama/<variant>/`` -- the prepared configuration, the predictions and the AMA log;
@@ -15,11 +16,12 @@ and the annotation file change, as ``vitprune evaluate`` does.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
 
-from common import FRAME_STEP, RESULTS, SETTINGS, annotations
+from common import FRAME_STEP, HERE, RESULTS, SETTINGS, VARIANTS, annotations
 
 from vitprune.pipeline.evaluation import (
     DownstreamModel,
@@ -28,7 +30,6 @@ from vitprune.pipeline.evaluation import (
     prepare_config,
 )
 
-VARIANTS = ("denso", "vitprune", "vitprune_mascara_antiga", "vitprune_regiao")
 PER_TIOU = re.compile(r"tIoU = ([\d.]+): mAP = ([\d.]+|nan) %")
 AVERAGE = re.compile(r"Average Map is :\s*([\d.]+|nan) %")
 
@@ -50,6 +51,7 @@ def main() -> None:
         weights=SETTINGS["ama_weights"],
     )
     annotated = labels()
+    path = os.pathsep.join(filter(None, [str(HERE), os.environ.get("PYTHONPATH")]))
     found = {}
     for variant in VARIANTS:
         request = EvaluationRequest(
@@ -62,7 +64,8 @@ def main() -> None:
         command = build_command(request, prepare_config(request))
         print(f"[{variant}] {' '.join(command)}", flush=True)
         finished = subprocess.run(
-            command, cwd=model.project_dir, capture_output=True, text=True, check=False
+            command, cwd=model.project_dir, capture_output=True, text=True, check=False,
+            env={**os.environ, "PYTHONPATH": path},
         )
         log = finished.stdout + finished.stderr
         (request.destination / "ama.log").write_text(log, encoding="utf-8")

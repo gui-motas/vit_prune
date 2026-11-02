@@ -1,8 +1,9 @@
 """Pure-Python stand-in for the AMA's compiled ``nms_1d_cpu`` extension.
 
 The compiled module in ``AMA/libs/utils`` only loads under the torch it was built
-against. This is a line-by-line port of ``libs/utils/csrc/nms_cpu.cpp`` so the AMA can
-run on CPU elsewhere; it is only imported when this folder comes first on the path.
+against. This is a line-by-line port of ``libs/utils/csrc/nms_cpu.cpp``;
+``evaluate_ama.py`` puts this folder on the AMA's path ahead of the installed packages,
+so every machine runs it.
 """
 
 from __future__ import annotations
