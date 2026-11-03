@@ -35,6 +35,13 @@ from vitprune.pipeline.extraction import _validate_encoding
 from vitprune.pipeline.provenance import SourceFile
 from vitprune.pipeline.video import find_videos, frame_count, iter_clips, spread_starts
 
+#: G1: the full level must reproduce the dense path to within this, per embedding value.
+IDENTITY_TOLERANCE = 1e-4
+#: G2: below this median cosine at this level, a policy alone is unlikely to recover
+#: fidelity; the merge and the cut need auditing first.
+G2_LEVEL = 1536
+G2_MEDIAN = 0.90
+
 SETTINGS = "settings.json"
 SOURCES = "sources.json"
 SUMMARY = "summary.json"
@@ -203,6 +210,20 @@ def summarise_records(records: Sequence[dict], levels: Sequence[int]) -> dict:
             "stages": stages,
         }
     return summary
+
+
+def p0_verdict(summary: dict, identity_max_diff: float, backbone_matches: bool) -> dict:
+    """The P0 gates, before any policy is built.
+
+    G1: the backbone check passed and the full level reproduced the dense path. G2: the
+    median cosine at 1536 tokens is at least 0.90. A failed G2 is not proof the policy is
+    unviable; it may call for more conservative budgets or for auditing the merge.
+    """
+    median = summary["levels"][str(G2_LEVEL)]["cos"]["p50"]
+    first = bool(backbone_matches) and identity_max_diff <= IDENTITY_TOLERANCE
+    second = median >= G2_MEDIAN
+    return {"G1": first, "G2": second, "passes": first and second,
+            "identity_max_diff": identity_max_diff, "cos_p50_at_1536": median}
 
 
 def _settle(out: Path, settings: dict) -> None:

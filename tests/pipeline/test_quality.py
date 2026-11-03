@@ -150,3 +150,19 @@ def test_budget_curve_writes_the_records_and_prints_the_summary(model, videos, t
     assert settings["depths"] == [1, 4] and settings["levels"] == LEVELS
     assert len(records) == 4 and set(sources) == {"a", "b"}
     assert (out / "summary.json").exists()
+
+
+@pytest.mark.parametrize("difference, matches, median, expected", [
+    (0.0, True, 0.95, {"G1": True, "G2": True, "passes": True}),
+    (2e-4, True, 0.95, {"G1": False, "G2": True, "passes": False}),
+    (0.0, False, 0.95, {"G1": False, "G2": True, "passes": False}),
+    (0.0, True, 0.899, {"G1": True, "G2": False, "passes": False}),
+    (1e-4, True, 0.90, {"G1": True, "G2": True, "passes": True}),
+])
+def test_the_p0_gates_follow_the_registered_thresholds(difference, matches, median, expected):
+    from vitprune.pipeline.quality import p0_verdict
+
+    summary = {"levels": {"1536": {"cos": {"p50": median}}}}
+    found = p0_verdict(summary, difference, matches)
+    assert {gate: found[gate] for gate in expected} == expected
+    assert found["cos_p50_at_1536"] == median and found["identity_max_diff"] == difference
