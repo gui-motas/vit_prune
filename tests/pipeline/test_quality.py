@@ -166,3 +166,182 @@ def test_the_p0_gates_follow_the_registered_thresholds(difference, matches, medi
     found = p0_verdict(summary, difference, matches)
     assert {gate: found[gate] for gate in expected} == expected
     assert found["cos_p50_at_1536"] == median and found["identity_max_diff"] == difference
+
+
+# ---------------------------------------------------------------------------
+# Fitting and validating the policy, on records written by hand
+# ---------------------------------------------------------------------------
+def _write_records(folder, videos, clips=40, seed=0, outside=()):
+    """Records of ``videos`` (stem -> driver). The drift grows with the probe error ``c``
+    and with fewer tokens; motion and redundancy are unrelated to it. The clips of the
+    videos in ``outside`` have a motion no fit video has."""
+    from dataclasses import asdict
+
+    rng = np.random.default_rng(seed)
+    folder.mkdir(parents=True)
+    geometry = reference_geometry()
+    settings = {"levels": LEVELS, "depths": [], "clips_per_video": clips, "stride": 16,
+                "frame_step": 2, "batch": 8, "precision": "off", "device": "cpu",
+                "prune_layer": 2, "motion_weight": 0.5, "spatial_prior": False,
+                "size_biased_attention": False,
+                "probe": {"cells": [2, 2], "top": 2, "fixed": [5, 7, 13, 15]},
+                "geometry": asdict(geometry), "weights": "abc"}
+    (folder / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    sources = {}
+    for stem, driver in videos.items():
+        lines = []
+        for clip in range(clips):
+            c = float(rng.random())
+            drift = {str(level): {"d_cos": c * (64 - level) / 48 * 0.4 + 0.01 * float(rng.random())}
+                     for level in LEVELS[:-1]}
+            lines.append({"video": stem, "driver": driver, "start": 16 * clip,
+                          "motion": 1000.0 if stem in outside else 30 + 10 * float(rng.random()),
+                          "redundancy": 0.73 + 0.05 * float(rng.random()),
+                          "probe_mean": c / 2, "probe_p90": c, "levels": drift})
+        (folder / f"{stem}.jsonl").write_text(
+            "".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+        sources[stem] = {"source": {"sha256": stem * 4}, "driver": driver, "clips": clips,
+                         "requested": clips}
+    (folder / "sources.json").write_text(json.dumps(sources), encoding="utf-8")
+    return folder
+
+
+FIT = {"a1": "1", "a2": "1", "b1": "2", "b2": "2", "c1": "3", "c2": "3"}
+HOLDOUT = {"h8": "8", "h9": "9"}
+
+
+def _fit(tmp_path, **options):
+    from vitprune.pipeline.quality import fit_quality_policy
+
+    outside = options.pop("outside", ())
+    folder = _write_records(tmp_path / "records", FIT | HOLDOUT, outside=outside)
+    return fit_quality_policy(folder, list(HOLDOUT), **options)
+
+
+def test_the_fit_uses_only_the_fit_videos_and_validates_on_the_holdout(tmp_path):
+    from vitprune.core.policy import QualityAwareBudgetPolicy
+
+    content = _fit(tmp_path)
+    policy = QualityAwareBudgetPolicy.from_dict(content["policy"])
+
+    assert sum(policy.support) == 6 * 40
+    splits = {video["stem"]: video["split"] for video in content["calibration"]["videos"]}
+    assert splits == {stem: "fit" for stem in FIT} | {stem: "holdout" for stem in HOLDOUT}
+    assert content["validation"]["with_probe"]["clips"] == 80
+
+
+def test_a_driver_on_both_sides_of_the_split_is_refused(tmp_path):
+    from vitprune.pipeline.quality import fit_quality_policy
+
+    folder = _write_records(tmp_path / "records", FIT | HOLDOUT)
+    with pytest.raises(ValueError, match="both sides"):
+        fit_quality_policy(folder, ["a2", "h9"])
+
+
+def test_an_unknown_holdout_video_is_refused(tmp_path):
+    from vitprune.pipeline.quality import fit_quality_policy
+
+    folder = _write_records(tmp_path / "records", FIT | HOLDOUT)
+    with pytest.raises(ValueError, match="zz"):
+        fit_quality_policy(folder, ["zz"])
+
+
+def test_a_record_with_a_non_finite_drift_is_refused_by_name(tmp_path):
+    from vitprune.pipeline.quality import fit_quality_policy
+
+    folder = _write_records(tmp_path / "records", FIT | HOLDOUT)
+    lines = (folder / "b1.jsonl").read_text(encoding="utf-8").splitlines()
+    record = json.loads(lines[3])
+    record["levels"]["32"]["d_cos"] = float("nan")
+    lines[3] = json.dumps(record)
+    (folder / "b1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="b1 at frame 48"):
+        fit_quality_policy(folder, list(HOLDOUT))
+
+
+def test_the_validation_reports_each_criterion_with_its_counts(tmp_path):
+    validation = _fit(tmp_path, tolerance=0.2)["validation"]
+
+    for criterion in ("V0", "V1", "V2", "V4"):
+        assert "passes" in validation[criterion]
+    assert validation["V0"]["clips"] == 80
+    assert validation["V2"]["compressed"] == validation["with_probe"]["compressed"]
+    assert all(found["n"] == 80 for found in validation["V1"]["by_level"].values())
+    assert set(validation["G3"]) == {"V0", "V1", "V2", "V4", "passes"}
+    assert len(validation["bins"]) == 6
+
+
+def test_the_probe_signal_passes_when_it_tracks_the_drift(tmp_path):
+    validation = _fit(tmp_path, tolerance=0.2)["validation"]
+
+    assert validation["V0"]["passes"]
+    assert validation["V1"]["used_levels"]
+    assert validation["V1"]["passes"]
+
+
+def test_a_policy_sending_everything_to_dense_is_degenerate(tmp_path):
+    gate = _fit(tmp_path, tolerance=1e-9)["validation"]["G3"]
+    assert gate == {"V0": False, "V1": None, "V2": None, "V4": None, "passes": False}
+
+
+def test_a_holdout_driver_with_nothing_compressed_is_reported_not_divided(tmp_path):
+    validation = _fit(tmp_path, tolerance=0.2, outside=("h8",))["validation"]
+
+    driver = validation["with_probe"]["coverage_by_driver"]["8"]
+    assert driver == {"clips": 40, "compressed": 0, "within": 0, "coverage": None}
+    assert validation["with_probe"]["reasons"]["out_of_range"] == 40
+
+
+def test_the_ablation_never_needs_the_probe(tmp_path):
+    assert _fit(tmp_path, no_probe=True)["policy"]["alpha"] == 1.0
+
+
+def test_the_curve_covers_the_registered_tolerances(tmp_path):
+    curve = _fit(tmp_path)["validation"]["curve"]
+
+    for name in ("with_probe", "without_probe"):
+        assert [point["tolerance"] for point in curve[name]] == [0.10, 0.15, 0.20, 0.30]
+    assert set(curve["fixed"]) == {"16", "32", "48"}
+    assert set(curve["fixed"]["16"]["within"]) == {"0.1", "0.15", "0.2", "0.3"}
+
+
+def test_a_quality_aware_policy_is_read_back_and_checked(tmp_path):
+    from vitprune.core.policy import QualityAwareBudgetPolicy
+    from vitprune.pipeline.calibration import read_policy, write_policy
+
+    path = write_policy(tmp_path / "qabp.json", _fit(tmp_path))
+    assert isinstance(read_policy(path, prune_layer=2, frame_step=2, precision="off"),
+                      QualityAwareBudgetPolicy)
+    with pytest.raises(ValueError, match="precision"):
+        read_policy(path, prune_layer=2, precision="fp16")
+    with pytest.raises(ValueError, match="prune_layer"):
+        read_policy(path, prune_layer=1)
+
+
+def test_a_policy_of_unknown_type_is_refused(tmp_path):
+    from vitprune.pipeline.calibration import read_policy, write_policy
+
+    content = _fit(tmp_path)
+    content["policy"]["policy_type"] = "something_else"
+    path = write_policy(tmp_path / "other.json", content)
+    with pytest.raises(ValueError, match="policy type"):
+        read_policy(path, prune_layer=2)
+
+
+def test_an_edited_quality_aware_policy_is_refused(tmp_path):
+    from vitprune.pipeline.calibration import read_policy, write_policy
+
+    content = _fit(tmp_path)
+    content["policy"]["tolerance"] = 0.5
+    path = write_policy(tmp_path / "edited.json", content)
+    with pytest.raises(ValueError, match="version"):
+        read_policy(path, prune_layer=2)
+
+
+def test_calibrate_quality_writes_the_policy_and_prints_the_verdict(tmp_path, capsys):
+    folder = _write_records(tmp_path / "records", FIT | HOLDOUT)
+    arguments = ["calibrate-quality", "--records", str(folder), "--holdout", *HOLDOUT,
+                 "--out", str(tmp_path / "qabp.json")]
+    assert main(arguments) == 0
+    assert "G3: " in capsys.readouterr().out
+    assert main(arguments) == 2  # the policy written is never replaced

@@ -7,6 +7,8 @@ Commands for integration, measurement and application:
 * ``calibrate`` -- fit the adaptive budget on calibration videos.
 * ``budget-curve`` -- how far each budget moves each clip's embedding from the dense one:
   what the quality-aware budget is calibrated on.
+* ``calibrate-quality`` -- fit the quality-aware budget on those records and validate it on
+  other drivers. No GPU needed.
 * ``region`` -- find the driver region with a person detector, on calibration videos.
 * ``latency`` -- time the adaptive budget against the dense path, on real clips.
 * ``drift`` -- measure how far the adaptive embedding moves. Needs video, no labels.
@@ -130,7 +132,8 @@ def _run_latency(args) -> int:
     plan = PruningPlan(
         prune_layer=args.prune_layer,
         size_biased_attention=args.size_biased_attention,
-        budget=read_policy(args.policy, args.prune_layer, args.frame_step, args.weights),
+        budget=read_policy(args.policy, args.prune_layer, args.frame_step, args.weights,
+                           args.precision),
     )
     backbone = _load_backbone(args)
     print(RULE)
@@ -418,6 +421,26 @@ def _run_budget_curve(args) -> int:
     return 0
 
 
+def _run_calibrate_quality(args) -> int:
+    from vitprune.pipeline.calibration import write_policy
+    from vitprune.pipeline.quality import describe_validation, fit_quality_policy
+
+    if Path(args.out).exists():
+        raise FileExistsError(f"refusing to overwrite the policy at {args.out}")
+    print(RULE)
+    print(f"fit on the records in {args.records}, validated on {', '.join(args.holdout)}")
+    print("the holdout must share no driver with the fit; neither may be evaluated")
+    print(RULE)
+    content = fit_quality_policy(
+        args.records, args.holdout, tolerance=args.tolerance, bins=args.bins,
+        min_support=args.min_support, min_videos=args.min_videos, no_probe=args.no_probe,
+    )
+    path = write_policy(args.out, content)
+    print(describe_validation(content["validation"]))
+    print(f"\npolicy {content['policy']['version']} written to {path}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # region
 # ---------------------------------------------------------------------------
@@ -603,7 +626,8 @@ def _plan_from(args, geometry: ClipGeometry):
         motion_weight=0.5 if args.motion_weight is None else args.motion_weight,
         spatial_prior=prior,
         size_biased_attention=args.size_biased_attention,
-        budget=read_policy(args.policy, args.prune_layer, args.frame_step, args.weights),
+        budget=read_policy(args.policy, args.prune_layer, args.frame_step, args.weights,
+                           args.precision),
     )
     plan.validate_for(geometry)
     return plan
@@ -732,6 +756,28 @@ def _build_parser() -> argparse.ArgumentParser:
     curve.add_argument("--prune-layer", type=int, default=2)
     curve.add_argument("--motion-weight", type=float, default=0.5)
     curve.set_defaults(handler=_run_budget_curve)
+
+    quality = commands.add_parser(
+        "calibrate-quality", help="fit and validate the quality-aware budget; no GPU needed"
+    )
+    quality.add_argument("--records", required=True, help="written by 'vitprune budget-curve'")
+    quality.add_argument(
+        "--holdout", required=True, nargs="+", metavar="STEM",
+        help="videos kept out of the fit to validate on; no driver may be on both sides",
+    )
+    quality.add_argument("--out", required=True, help="policy file to write; never replaced")
+    quality.add_argument(
+        "--tolerance", type=float, default=0.10,
+        help="largest drift 1 - cos accepted at the risk quantile (default: %(default)s)",
+    )
+    quality.add_argument("--bins", type=int, default=6)
+    quality.add_argument("--min-support", type=int, default=30, help="clips per bin to trust it")
+    quality.add_argument("--min-videos", type=int, default=3, help="videos per bin to trust it")
+    quality.add_argument(
+        "--no-probe", action="store_true",
+        help="write the ablation: the same risk table without the probe",
+    )
+    quality.set_defaults(handler=_run_calibrate_quality)
 
     region = commands.add_parser("region", help="find the driver region with a person detector")
     region.add_argument("--videos", required=True, help="calibration videos, not evaluated")

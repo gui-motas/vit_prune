@@ -21,7 +21,12 @@ import torch
 
 from vitprune.bench.latency import autocast
 from vitprune.core.encoder import PrunedEncoder
-from vitprune.core.policy import BudgetPolicy, calibrate_policy
+from vitprune.core.policy import (
+    QUALITY_AWARE,
+    BudgetPolicy,
+    QualityAwareBudgetPolicy,
+    calibrate_policy,
+)
 from vitprune.core.statistics import ClipStatistics
 from vitprune.pipeline.extraction import _validate_encoding
 from vitprune.pipeline.provenance import SourceFile
@@ -128,13 +133,28 @@ def read_policy(
     prune_layer: int,
     frame_step: int | None = None,
     weights: str | Path | None = None,
-) -> BudgetPolicy:
+    precision: str | None = None,
+) -> BudgetPolicy | QualityAwareBudgetPolicy:
     """Read a policy file and check it was calibrated for the same cut, sampling and,
-    when ``weights`` is given, the same checkpoint."""
+    when ``weights`` is given, the same checkpoint.
+
+    The legacy policy and the quality-aware one are told apart by ``policy_type``. The
+    quality-aware one is also refused under another precision: its risk table is drift
+    measured under one.
+    """
     content = json.loads(Path(path).read_text(encoding="utf-8"))
-    policy = BudgetPolicy.from_dict(content["policy"])
+    data = content["policy"]
+    kind = data.get("policy_type")
+    if kind is None:
+        policy = BudgetPolicy.from_dict(data)
+    elif kind == QUALITY_AWARE:
+        policy = QualityAwareBudgetPolicy.from_dict(data)
+    else:
+        raise ValueError(f"unknown policy type {kind!r} in {path}")
     calibration = content.get("calibration", {})
     checks = {"prune_layer": prune_layer, "frame_step": frame_step}
+    if kind == QUALITY_AWARE:
+        checks["precision"] = precision
     for name, value in checks.items():
         recorded = calibration.get(name)
         if value is not None and recorded is not None and recorded != value:
