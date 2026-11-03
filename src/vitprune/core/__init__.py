@@ -26,7 +26,7 @@ from vitprune.core.compressibility import (
     compressibility_features,
     fixed_anchors,
 )
-from vitprune.core.encoder import ClipBudget, PrunedEncoder, PruningPlan
+from vitprune.core.encoder import ClipBudget, LevelEncoding, PrunedEncoder, PruningPlan
 from vitprune.core.geometry import ClipGeometry
 from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import (
@@ -49,6 +49,7 @@ __all__ = [
     "CompatibilityReport",
     "CompressibilityFeatures",
     "FixedBudget",
+    "LevelEncoding",
     "MergedTokens",
     "PrunedEncoder",
     "PruningPlan",

@@ -23,6 +23,7 @@ considerably more complexity.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Real
@@ -32,12 +33,18 @@ import torch
 from torch import nn
 
 from vitprune.core.attention import run_block
+from vitprune.core.compressibility import (
+    PROBE_CELLS,
+    PROBE_TOP,
+    CompressibilityFeatures,
+    compressibility_features,
+)
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 from vitprune.core.inspection import TokenSelection
-from vitprune.core.merging import initial_sizes, merge_tokens, size_weighted_mean
+from vitprune.core.merging import initial_sizes, merge_error, merge_tokens, size_weighted_mean
 from vitprune.core.policy import BudgetPolicy, FixedBudget
 from vitprune.core.protocols import missing_attributes
-from vitprune.core.scoring import score_tokens
+from vitprune.core.scoring import apply_prior, score_tokens
 from vitprune.core.statistics import ClipStatistics, clip_statistics
 
 
@@ -137,6 +144,24 @@ class ClipBudget(NamedTuple):
     statistics: ClipStatistics
 
 
+class LevelEncoding(NamedTuple):
+    """The same clips at several fixed budgets, measured from one cut.
+
+    Attributes:
+        features: what a budget sees of each clip at the cut, before any merge.
+        embeddings: ``{level: [batch, embed_dim]}``. The full level is the dense path.
+        stages: ``{level: {block: [batch, embed_dim]}}``, the size-weighted mean of the
+            tokens after that block, before any normalisation.
+        merge_error: ``{level: [batch, slices, tokens]}``, as
+            :func:`vitprune.core.merging.merge_error`; zero for the full level.
+    """
+
+    features: CompressibilityFeatures
+    embeddings: dict[int, torch.Tensor]
+    stages: dict[int, dict[int, torch.Tensor]]
+    merge_error: dict[int, torch.Tensor]
+
+
 class PrunedEncoder(nn.Module):
     """Wraps a video backbone and prunes its tokens mid-forward.
 
@@ -229,6 +254,64 @@ class PrunedEncoder(nn.Module):
         taken from the same grid the score sees, before any merge.
         """
         return clip_statistics(self._grid_at_cut(clips))
+
+    @torch.no_grad()
+    def encode_levels(
+        self,
+        clips: torch.Tensor,
+        levels: Sequence[int],
+        depths: Sequence[int] = (),
+        cells: tuple[int, int] = PROBE_CELLS,
+        top: int = PROBE_TOP,
+    ) -> LevelEncoding:
+        """Every level from one cut: for calibration and diagnosis, never for inference.
+
+        The blocks up to the cut run once; the remaining blocks then run once per level,
+        which inference never does. The point is to see what each budget would have done
+        to the same clip, with the plan's own selection. The full level, the dense path,
+        is always measured: it is the reference.
+
+        Args:
+            clips: ``[batch, channels, frames, height, width]``.
+            levels: tokens kept per clip, each a multiple of the temporal slices.
+            depths: blocks after which to record the mean of the tokens, from the pruning
+                layer (right after the merge) to the last.
+            cells, top: the probe's anchors, as in
+                :func:`vitprune.core.compressibility.probe_errors`.
+        """
+        levels = sorted({*levels, self.geometry.num_tokens})
+        for level in levels:
+            FixedBudget(level).validate_for(self.geometry)
+        cut = self.plan.prune_layer
+        if any(not cut <= depth <= self.geometry.depth for depth in depths):
+            raise ValueError(f"depths must lie between block {cut} and {self.geometry.depth}")
+
+        grid = self._grid_at_cut(clips)
+        base = score_tokens(grid, self.plan.motion_weight)
+        prior = self.plan.spatial_prior
+        scores = base if prior is None else apply_prior(base, prior)
+        features = compressibility_features(grid, base, cells=cells, top=top)
+
+        count, slices, per_slice, dim = grid.shape
+        embeddings, stages, errors = {}, {}, {}
+        for level in levels:
+            keep = level // slices
+            if keep == per_slice:
+                group, sizes = grid.reshape(count, slices * keep, dim), None
+                errors[level] = grid.new_zeros(grid.shape[:3])
+            else:
+                merged = merge_tokens(grid, initial_sizes(grid), scores, keep)
+                group, sizes = merged.tokens.reshape(count, slices * keep, dim), merged.sizes
+                errors[level] = merge_error(grid, scores, keep, merged)
+            stages[level] = {}
+            if cut in depths:
+                stages[level][cut] = self._mean(group, sizes)
+            for index, block in enumerate(list(self.backbone.blocks)[cut:], start=cut + 1):
+                group = self._run(block, group, sizes)
+                if index in depths:
+                    stages[level][index] = self._mean(group, sizes)
+            embeddings[level] = self._pool(group, sizes)
+        return LevelEncoding(features, embeddings, stages, errors)
 
     # -- internals ----------------------------------------------------------
     def _encode(self, clips: torch.Tensor) -> tuple[torch.Tensor, ClipBudget | None]:
@@ -388,6 +471,13 @@ class PrunedEncoder(nn.Module):
     def _as_grid(self, tokens: torch.Tensor, per_slice: int) -> torch.Tensor:
         batch, _, dim = tokens.shape
         return tokens.reshape(batch, self.geometry.temporal_slices, per_slice, dim)
+
+    @staticmethod
+    def _mean(tokens: torch.Tensor, sizes: torch.Tensor | None) -> torch.Tensor:
+        """The size-weighted mean of the tokens, with no normalisation."""
+        if sizes is None:
+            return tokens.mean(dim=1)
+        return size_weighted_mean(tokens, sizes.reshape(tokens.shape[0], tokens.shape[1], 1))
 
     def _pool(self, tokens: torch.Tensor, sizes: torch.Tensor | None):
         norm = getattr(self.backbone, "norm", None)
