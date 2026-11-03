@@ -1,0 +1,522 @@
+"""Turn the benchmark records into a spreadsheet and figures.
+
+Reads what ``vitprune benchmark run`` and, once it has run, ``vitprune benchmark ama``
+wrote under the results folder, and writes there:
+
+* ``benchmark-vitprune.xlsx`` -- the summary per variant; every detection of the dense
+  pipeline read whole, per variant; the tokens kept per video; and the configuration the
+  numbers were produced under;
+* ``figuras/`` -- the fixed and the smart mask over a frame of each video, the tokens each
+  variant kept in clips spread over each video, the AMA's detections along each video and a
+  chart of the summary.
+
+There are no labels. The dense pipeline is the reference, in two places: the class the
+classification head gives each clip, and the detections of the AMA. A variant "agrees" when
+it gives what the dense gave; that measures how much pruning changes the result, not
+whether the result is right.
+
+Needs the ``benchmark`` extra: pandas, openpyxl and matplotlib.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+from matplotlib.patches import Patch, Rectangle  # noqa: E402
+
+from vitprune.bench.cost import budget_cost  # noqa: E402
+from vitprune.pipeline.benchmark.settings import GEOMETRY, VARIANTS, RunRecord  # noqa: E402
+
+NAMES = {
+    "denso": "Sem ViT-Prune (denso, referência)",
+    "vitprune": "ViT-Prune sem máscara",
+    "vitprune_mascara_fixa": "ViT-Prune + máscara fixa",
+    "vitprune_mascara_inteligente": "ViT-Prune + máscara inteligente",
+}
+SHORT = {
+    "denso": "Denso",
+    "vitprune": "Sem máscara",
+    "vitprune_mascara_fixa": "Máscara fixa",
+    "vitprune_mascara_inteligente": "Máscara inteligente",
+}
+def short_label(variant: str) -> str:
+    """A variant's name for a chart axis; the dense one says it is the reference."""
+    return "Denso (referência)" if variant == "denso" else SHORT[variant]
+
+
+COLORS = {"denso": "#7f7f7f", "vitprune": "#1f77b4", "vitprune_mascara_fixa": "#ff7f0e",
+          "vitprune_mascara_inteligente": "#d62728"}
+PRUNED = VARIANTS[1:]
+GRID = GEOMETRY.grid_size
+MIDDLE_SLICE = GEOMETRY.temporal_slices // 2
+#: Detections below this confidence are left out, in the reference and in each variant.
+MIN_SCORE = 0.3
+#: A detection of a variant matches one of the dense when the same class overlaps this much.
+TIOU = 0.5
+CLASSES = "Concordância de classe com o denso"
+RECALL = "Detecções do denso reencontradas (recall)"
+PRECISION = "Detecções confirmadas pelo denso (precisão)"
+MEAN_TIOU = "tIoU médio com o denso"
+#: Columns shown as percentages in the workbook.
+PERCENT = ("Concordância", "recall", "precisão", "(%)", "região")
+
+
+def load(record: RunRecord) -> pd.DataFrame:
+    rows = [json.loads(line)
+            for line in (record.out / "clips.jsonl").read_text("utf-8").splitlines()]
+    return pd.DataFrame(rows)
+
+
+def recorded(record: RunRecord) -> tuple[dict, dict]:
+    """The policy and the region files the run names."""
+    policy = json.loads(Path(record.run["policy"]["path"]).read_text("utf-8"))
+    region = json.loads(Path(record.run["region"]["path"]).read_text("utf-8"))
+    return policy, region
+
+
+def ama_detections(record: RunRecord) -> dict[str, pd.DataFrame] | None:
+    """The AMA's detections per variant, in seconds, when ``vitprune benchmark ama`` has run."""
+    paths = {variant: record.out / "ama" / variant / "predictions.csv" for variant in VARIANTS}
+    if not all(path.exists() for path in paths.values()):
+        return None
+    return {variant: pd.read_csv(path) for variant, path in paths.items()}
+
+
+def head_probabilities(record: RunRecord, frame: pd.DataFrame) -> dict[str, dict[str, np.ndarray]]:
+    """The head's class probabilities per variant and video, one row per clip in clip order."""
+    found = {}
+    for variant in VARIANTS:
+        found[variant] = {}
+        for stem in record.stems:
+            probabilities = np.load(record.out / "features" / variant / f"{stem}.npz")["a_prob"]
+            clips = ((frame["video"] == stem) & (frame["variant"] == variant)).sum()
+            if len(probabilities) != clips:
+                raise ValueError(f"{variant}/{stem}.npz holds {len(probabilities)} clips, "
+                                 f"clips.jsonl {clips}; the run is incomplete")
+            found[variant][stem] = probabilities
+    return found
+
+
+def best_tiou(a: pd.DataFrame, b: pd.DataFrame) -> np.ndarray:
+    """For each detection in ``a``, the highest tIoU with a detection of ``b`` of the same
+    video and class; 0 when there is none."""
+    a = a.reset_index(drop=True)
+    best = np.zeros(len(a))
+    if a.empty or b.empty:
+        return best
+    for (video, label), rows in a.groupby(["video-id", "label"]):
+        other = b[(b["video-id"] == video) & (b["label"] == label)]
+        if other.empty:
+            continue
+        start, end = rows["t-start"].to_numpy()[:, None], rows["t-end"].to_numpy()[:, None]
+        other_start, other_end = other["t-start"].to_numpy(), other["t-end"].to_numpy()
+        inter = np.clip(np.minimum(end, other_end) - np.maximum(start, other_start), 0, None)
+        union = np.maximum(end, other_end) - np.minimum(start, other_start)
+        best[rows.index.to_numpy()] = np.divide(
+            inter, union, out=np.zeros(inter.shape), where=union > 0
+        ).max(axis=1)
+    return best
+
+
+def agreement(reference: pd.DataFrame, found: pd.DataFrame, tiou: float = TIOU,
+              min_score: float = MIN_SCORE) -> dict:
+    """How the detections ``found`` agree with the ``reference``, both from ``min_score`` up.
+
+    ``recall`` is the share of the reference that ``found`` has again at ``tiou``;
+    ``precision``, the share of ``found`` that the reference has; ``mean_tiou``, the best
+    tIoU of each reference detection, 0 for the ones not found, averaged. ``None`` when the
+    side a figure divides by is empty.
+    """
+    reference = reference[reference["score"] >= min_score]
+    found = found[found["score"] >= min_score]
+    toward, back = best_tiou(reference, found), best_tiou(found, reference)
+    return {
+        "recall": None if reference.empty else float((toward >= tiou).mean()),
+        "precision": None if found.empty else float((back >= tiou).mean()),
+        "mean_tiou": None if reference.empty else float(toward.mean()),
+    }
+
+
+def class_agreement(dense: np.ndarray, other: np.ndarray) -> float:
+    """The share of clips where the head's top class is the dense one's."""
+    if len(dense) != len(other):
+        raise ValueError(f"{len(other)} clips against the dense run's {len(dense)}")
+    return float((dense.argmax(axis=1) == other.argmax(axis=1)).mean())
+
+
+def window_class(probabilities: np.ndarray, starts_s: np.ndarray, span_s: float,
+                 window: tuple[float, float]) -> int | None:
+    """The class the head gives a stretch of video: the top class of the mean probabilities
+    over the clips lying wholly inside the window; ``None`` when there are none."""
+    inside = (starts_s >= window[0]) & (starts_s + span_s <= window[1])
+    return int(probabilities[inside].mean(axis=0).argmax()) if inside.any() else None
+
+
+def summary(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
+            detections: dict | None, area: float, tiou: float, min_score: float) -> pd.DataFrame:
+    dense_seconds = frame[frame["variant"] == "denso"]["seconds"].mean()
+
+    def pooled(variant: str) -> np.ndarray:
+        return np.concatenate([probabilities[variant][stem] for stem in record.stems])
+
+    table = []
+    for variant in VARIANTS:
+        rows = frame[frame["variant"] == variant]
+        tokens = rows["tokens"].astype(int).tolist()
+        layer = 0 if variant == "denso" else record.prune_layer
+        row = {"Variante": NAMES[variant], CLASSES: class_agreement(pooled("denso"),
+                                                                    pooled(variant))}
+        if detections is not None:
+            got = agreement(detections["denso"], detections[variant], tiou, min_score)
+            row |= {RECALL: got["recall"], PRECISION: got["precision"],
+                    MEAN_TIOU: got["mean_tiou"]}
+        row |= {
+            "Tokens médios por clipe": np.mean(tokens),
+            "Tokens mantidos (%)": np.mean(tokens) / GEOMETRY.num_tokens,
+            # Dense keeps every token, so its share is the region's area.
+            "Tokens na região do motorista": area if variant == "denso"
+            else rows["inside_region"].mean(),
+            "Cosseno médio com o denso": rows["cosine_to_dense"].mean(),
+            "Speedup previsto": budget_cost(GEOMETRY, tokens, layer).predicted_speedup,
+            "Speedup medido": dense_seconds / rows["seconds"].mean(),
+            "Tempo médio por clipe (s)": rows["seconds"].mean(),
+        }
+        table.append(row)
+    return pd.DataFrame(table)
+
+
+def by_detection(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
+                 detections: dict, min_score: float) -> pd.DataFrame:
+    """Each detection of the dense pipeline read whole: the best tIoU each variant has with
+    it, and the class the head gives each variant over the clips inside its window."""
+    reference = detections["denso"]
+    reference = reference[reference["score"] >= min_score].reset_index(drop=True)
+    table = pd.DataFrame({
+        "Vídeo": reference["video-id"],
+        "Classe": [f"classe {label}" for label in reference["label"]],
+        "Início (s)": reference["t-start"],
+        "Fim (s)": reference["t-end"],
+        "Confiança do denso": reference["score"],
+    })
+    for variant in VARIANTS:
+        found = detections[variant]
+        table[f"{SHORT[variant]}: melhor tIoU"] = best_tiou(
+            reference, found[found["score"] >= min_score])
+        classes = []
+        for _, row in reference.iterrows():
+            stem = row["video-id"]
+            starts = frame[(frame["video"] == stem) & (frame["variant"] == variant)]
+            starts = starts.sort_values("start_frame")["start_s"].to_numpy()
+            span = record.settings["frame_step"] * GEOMETRY.frames_per_clip \
+                / record.video(stem)["fps"]
+            found_class = window_class(probabilities[variant][stem], starts, span,
+                                       (row["t-start"], row["t-end"]))
+            classes.append(None if found_class is None else f"classe {found_class}")
+        table[f"{SHORT[variant]}: classe no trecho"] = classes
+    return table
+
+
+def per_video(frame: pd.DataFrame, area: float, levels: list[int]) -> pd.DataFrame:
+    table = []
+    for (video, variant), rows in frame.groupby(["video", "variant"], sort=False):
+        row = {"Vídeo": video, "Variante": NAMES[variant], "Clipes": len(rows),
+               "Tokens médios por clipe": rows["tokens"].mean()}
+        for level in levels:
+            row[f"Clipes com {level} tokens (%)"] = (
+                None if variant == "denso" else (rows["tokens"] == level).mean())
+        row["Tokens na região do motorista"] = (
+            area if variant == "denso" else rows["inside_region"].mean())
+        row["Cosseno médio com o denso"] = rows["cosine_to_dense"].mean()
+        row["Tempo médio por clipe (s)"] = rows["seconds"].mean()
+        table.append(row)
+    return pd.DataFrame(table)
+
+
+def fixed_mask_text(record: RunRecord) -> str:
+    fixed = record.fixed_mask
+    return f"{fixed['rows']} linhas do topo com peso {fixed['weight']}".replace(".", ",")
+
+
+def configuration(record: RunRecord, policy: dict, region: dict, tiou: float,
+                  min_score: float) -> pd.DataFrame:
+    run, settings = record.run, record.settings
+    hardware = run["environment"].get("gpu") or "CPU"
+    fitted, found = policy["calibration"], region["calibration"]
+    detector = found.get("detector") or {}
+    detector_weights = Path(detector.get("weights", {}).get("path", "?")).name
+    items = [
+        ("Modelo", "VideoMAEv2-g (ViT-g/14) com a cabeça de 16 classes do ajuste AI City"),
+        ("Pesos", run["weights"]["path"]),
+        ("Pesos: SHA-256", run["weights"]["sha256"]),
+        ("Definição do modelo", run["model_source"]),
+        ("Verificação do caminho denso", run["check"]),
+        ("Ambiente", f"Python {run['environment']['python']}, torch "
+                     f"{run['environment']['torch']}, {hardware} ({settings['device']}), "
+                     f"precisão {settings['precision']}"),
+        ("Política", f"{policy['policy']['version']} calibrada em {fitted['clips']} clipes de "
+                     f"{len(fitted['videos'])} vídeos ({run['policy']['path']})"),
+        ("Política: níveis e limiares", json.dumps({"levels": policy["policy"]["levels"],
+                                                    "thresholds": policy["policy"]["thresholds"]})),
+        ("Máscara fixa", fixed_mask_text(record)),
+        ("Máscara inteligente",
+         f"região do motorista: {found['area']:.0%} do quadro, motorista detectado em "
+         f"{found['detected']} de {found['clips']} clipes de {len(found['videos'])} vídeos, "
+         f"detector {detector_weights} (Ultralytics {detector.get('version', '?')}) "
+         f"({run['region']['path']})"),
+    ]
+    items += [(f"Configuração: {k}", json.dumps(v, ensure_ascii=False))
+              for k, v in settings.items()]
+    items += [(f"{stem}: clipes", video["clips"]) for stem, video in run["schedules"].items()]
+    items += [
+        ("Nota: referência",
+         "Não há labels: a referência é o pipeline denso. Cada variante é comparada com ele na "
+         "cabeça de classificação (a classe de maior probabilidade de cada clipe) e nas "
+         f"detecções do AMA (as do denso com confiança de {min_score:g} para cima; uma "
+         f"detecção da variante as reencontra quando é da mesma classe e tem tIoU de "
+         f"{tiou:g} ou mais). Concordância não é acerto: se o denso errar, a variante que erra "
+         "igual concorda. Mede o quanto a poda muda o resultado, não se ele está certo."),
+        ("Nota: máscaras", "As três variantes do ViT-Prune usam a mesma política e mantêm os "
+                           "mesmos tokens por clipe; as máscaras só mudam quais tokens ficam."),
+        ("Nota: calibração", "A política e a região vêm de vitprune calibrate e vitprune region, "
+                             "em vídeos que não são avaliados aqui."),
+        ("Nota: pré-processamento", "Quadro inteiro (1920x1080) redimensionado para 224x224, "
+                                    "como no pipeline do vitprune. O AMA e o ajuste do "
+                                    "VideoMAEv2 usaram recortes do motorista (crop_videos): a "
+                                    "acurácia absoluta do denso não é a do AI City; o contraste "
+                                    "entre variantes é o que vale."),
+        ("Nota: tempos", f"Medidos em {hardware}, {settings['batch']} clipe(s) por vez: "
+                         "servem para comparar variantes entre si."),
+    ]
+    return pd.DataFrame(items, columns=["Item", "Valor"])
+
+
+def writable(path: Path) -> Path:
+    """The path itself, or a timestamped sibling when another program holds it open:
+    Windows locks a workbook open in Excel and an image open in some viewers."""
+    try:
+        path.open("ab").close()
+        return path
+    except OSError:
+        found = path.with_stem(f"{path.stem}-{datetime.now():%Y%m%d-%H%M%S}")
+        print(f"{path.name} is open elsewhere; writing {found.name} instead")
+        return found
+
+
+def write_excel(record: RunRecord, sheets: dict[str, pd.DataFrame]) -> Path:
+    path = writable(record.out / "benchmark-vitprune.xlsx")
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        for name, table in sheets.items():
+            table.to_excel(writer, sheet_name=name, index=False)
+            sheet = writer.sheets[name]
+            for column, title in enumerate(table.columns, start=1):
+                width = max([len(str(title)), *(len(f"{v:.3f}" if isinstance(v, float) else str(v))
+                                                for v in table[title].head(200))])
+                letter = sheet.cell(row=1, column=column).column_letter
+                sheet.column_dimensions[letter].width = min(width + 2, 70)
+                share = any(k in str(title) for k in PERCENT)
+                for row in range(2, len(table) + 2):
+                    cell = sheet.cell(row=row, column=column)
+                    if isinstance(cell.value, float):
+                        cell.number_format = "0.0%" if share else "0.000"
+            sheet.freeze_panes = "A2"
+    print(f"written {path}")
+    return path
+
+
+def cells_to_pixels(cells: np.ndarray, height: int, width: int) -> np.ndarray:
+    rows = np.arange(height) * GRID // height
+    columns = np.arange(width) * GRID // width
+    return cells.reshape(GRID, GRID)[rows[:, None], columns[None, :]]
+
+
+def shade(image: np.ndarray, inside: np.ndarray, dim: float = 0.3) -> np.ndarray:
+    out = image.astype(np.float32)
+    out[~cells_to_pixels(inside, *image.shape[:2])] *= dim
+    return out.clip(0, 255).astype(np.uint8)
+
+
+def outline(axis, cells: np.ndarray, height: int, width: int, color: str) -> None:
+    for position in np.flatnonzero(cells.reshape(-1)):
+        row, column = divmod(int(position), GRID)
+        axis.add_patch(Rectangle((column * width / GRID, row * height / GRID), width / GRID,
+                                 height / GRID, fill=False, edgecolor=color, linewidth=0.6))
+
+
+def frame_of(record: RunRecord, stem: str, start: int) -> np.ndarray:
+    image = plt.imread(record.frames / stem / f"{start:06d}.jpg")
+    return image[::2, ::2]
+
+
+def show_fixed(axis, image: np.ndarray, fixed: np.ndarray) -> None:
+    height, width = image.shape[:2]
+    axis.imshow(shade(image, fixed > 0.5, dim=0.35))
+    outline(axis, fixed < 0.5, height, width, "orangered")
+
+
+def show_smart(axis, image: np.ndarray, smart: np.ndarray) -> None:
+    height, width = image.shape[:2]
+    axis.imshow(shade(image, smart > 0.5))
+    outline(axis, smart > 0.5, height, width, "magenta")
+
+
+def masks_figure(record: RunRecord, stem: str, start: int, smart: np.ndarray,
+                 fixed: np.ndarray) -> None:
+    image = frame_of(record, stem, start)
+    figure, axes = plt.subplots(1, 2, figsize=(16, 4.9))
+    show_fixed(axes[0], image, fixed)
+    axes[0].set_title(f"Máscara fixa: {fixed_mask_text(record)}")
+    show_smart(axes[1], image, smart)
+    axes[1].set_title(f"Máscara inteligente (YOLO nos vídeos de calibração): "
+                      f"{smart.mean():.0%} do quadro")
+    for axis in axes:
+        axis.axis("off")
+    figure.suptitle(f"Máscaras aplicadas a {stem}", fontsize=13)
+    figure.tight_layout()
+    figure.savefig(writable(record.figures / f"mascaras-{stem}.png"), dpi=110)
+    plt.close(figure)
+
+
+def selection_figure(record: RunRecord, frame: pd.DataFrame, stem: str, start: int) -> None:
+    arrays = np.load(record.out / "selection" / f"{stem}_{start:06d}.npz")
+    rows = frame[(frame["video"] == stem) & (frame["start_frame"] == start)].set_index("variant")
+    image = frame_of(record, stem, start)
+    height, width = image.shape[:2]
+
+    figure, axes = plt.subplots(2, 3, figsize=(19, 8.4))
+    axes[0, 0].imshow(image)
+    axes[0, 0].set_title("Quadro original", fontsize=10)
+    show_fixed(axes[0, 1], image, arrays["vitprune_mascara_fixa_prior"])
+    axes[0, 1].set_title(f"Máscara fixa ({fixed_mask_text(record)})", fontsize=10)
+    smart = arrays["vitprune_mascara_inteligente_prior"]
+    show_smart(axes[0, 2], image, smart)
+    axes[0, 2].set_title(f"Máscara inteligente ({smart.mean():.0%} do quadro)", fontsize=10)
+    for axis, variant in zip(axes[1], PRUNED, strict=True):
+        kept = arrays[f"{variant}_kept"][MIDDLE_SLICE]
+        axis.imshow(shade(image, kept, dim=0.25))
+        outline(axis, kept, height, width, "lime")
+        row = rows.loc[variant]
+        axis.set_title(f"{SHORT[variant]}: {kept.sum()} de {GRID * GRID} tokens na fatia "
+                       f"({int(row['tokens'])} no clipe)\n"
+                       f"{row['inside_region']:.0%} dos tokens na região do motorista",
+                       fontsize=10)
+    for axis in axes.flat:
+        axis.axis("off")
+    figure.suptitle(f"{stem} | clipe em {rows['start_s'].iloc[0]:.1f} s  (claro = token "
+                    f"mantido, escuro = fundido; fatia temporal central)", fontsize=12)
+    figure.tight_layout()
+    figure.savefig(writable(record.figures / f"selecao-{stem}-{start:06d}.png"), dpi=100)
+    plt.close(figure)
+
+
+def timeline_figure(record: RunRecord, stem: str, detections: dict[str, pd.DataFrame],
+                    min_score: float = MIN_SCORE) -> None:
+    """What the AMA found along the video, per variant; the dense one is the reference."""
+    ids = sorted({int(label) for found in detections.values() for label in found["label"]})
+    colors = {label: plt.cm.tab20.colors[label % 20] for label in ids}
+    lanes = []
+    for variant in VARIANTS:
+        found = detections[variant]
+        found = found[(found["video-id"] == stem) & (found["score"] >= min_score)]
+        title = short_label(variant) if variant == "denso" else f"AMA: {SHORT[variant]}"
+        lanes.append((title, list(zip(found["t-start"], found["t-end"], found["label"],
+                                      found["score"], strict=True))))
+    figure, axis = plt.subplots(figsize=(22, 4.2))
+    for lane, (_, bars) in enumerate(lanes):
+        for start, end, label, score in sorted(bars, key=lambda bar: bar[3]):
+            axis.barh(lane, end - start, left=start, height=0.7, color=colors[int(label)],
+                      alpha=0.35 + 0.65 * min(float(score), 1.0))
+    axis.set_yticks(range(len(lanes)), [title for title, _ in lanes])
+    axis.invert_yaxis()
+    axis.set_xlabel("segundos no vídeo")
+    axis.set_title(f"{stem}: detecções do AMA (confiança ≥ {min_score:g}; "
+                   "mais opaco = mais confiante)")
+    if ids:
+        figure.legend(handles=[Patch(color=colors[i], label=f"classe {i}") for i in ids],
+                      loc="lower center", ncol=8, fontsize=8)
+    figure.tight_layout(rect=(0, 0.12, 1, 1))
+    figure.savefig(writable(record.figures / f"linha-do-tempo-{stem}.png"), dpi=110)
+    plt.close(figure)
+
+
+def summary_figure(record: RunRecord, table: pd.DataFrame) -> None:
+    metrics = [
+        (RECALL, "Detecções do denso reencontradas (%)", 100, "{:.0f}"),
+        (CLASSES, "Concordância de classe com o denso (%)", 100, "{:.0f}"),
+        ("Tokens na região do motorista", "Tokens na região do motorista (%)", 100, "{:.0f}"),
+        ("Tokens médios por clipe", "Tokens médios por clipe", 1, "{:.0f}"),
+        ("Speedup medido", "Speedup medido", 1, "{:.1f}x"),
+    ]
+    metrics = [m for m in metrics if m[0] in table and table[m[0]].notna().any()]
+    figure, axes = plt.subplots(1, len(metrics), figsize=(4.4 * len(metrics), 4.6))
+    for axis, (column, title, scale, label) in zip(np.atleast_1d(axes), metrics, strict=True):
+        values = (table[column] * scale).tolist()
+        axis.bar(range(len(VARIANTS)), values, color=[COLORS[v] for v in VARIANTS])
+        for x, value in enumerate(values):
+            if value == value:  # skips NaN
+                axis.text(x, value, label.format(value), ha="center", va="bottom", fontsize=8)
+        axis.set_xticks(range(len(VARIANTS)), [short_label(v) for v in VARIANTS], rotation=20,
+                        fontsize=8)
+        axis.set_title(title, fontsize=10)
+    figure.tight_layout()
+    figure.savefig(writable(record.figures / "resumo.png"), dpi=110)
+    plt.close(figure)
+
+
+def make_report(out: str | Path, min_score: float = MIN_SCORE, tiou: float = TIOU) -> Path:
+    """Write the workbook and the figures under ``out``, the folder of a finished run.
+
+    Args:
+        out: the results folder of ``vitprune benchmark run``.
+        min_score: detections below this confidence are left out, in the dense reference and
+            in each variant.
+        tiou: the overlap at which a variant's detection matches one of the dense.
+
+    Returns:
+        The workbook.
+    """
+    record = RunRecord.read(out)
+    try:
+        import openpyxl  # noqa: F401 -- pandas writes the workbook through it
+    except ImportError as error:  # better now than after the tables are built
+        raise RuntimeError(
+            "the workbook needs openpyxl: pip install 'vitprune[benchmark]'"
+        ) from error
+    frame = load(record)
+    policy, region = recorded(record)
+    area = float(np.mean(region["region"]["prior"]))
+    detections = ama_detections(record)
+    probabilities = head_probabilities(record, frame)
+    table = summary(record, frame, probabilities, detections, area, tiou, min_score)
+    sheets = {"Resumo": table}
+    if detections is not None:
+        sheets["Por detecção do denso"] = by_detection(record, frame, probabilities, detections,
+                                                       min_score)
+    sheets["Por vídeo"] = per_video(frame, area, policy["policy"]["levels"])
+    sheets["Configuração"] = configuration(record, policy, region, tiou, min_score)
+    workbook = write_excel(record, sheets)
+
+    record.figures.mkdir(parents=True, exist_ok=True)
+    summary_figure(record, table)
+    shown = sorted((record.out / "selection").glob("*.npz"))
+    for path in shown:
+        stem, start = path.stem.rsplit("_", 1)
+        selection_figure(record, frame, stem, int(start))
+    for stem in record.stems:
+        first = next((p for p in shown if p.stem.rsplit("_", 1)[0] == stem), None)
+        if first is not None:
+            arrays = np.load(first)
+            masks_figure(record, stem, int(first.stem.rsplit("_", 1)[1]),
+                         arrays["vitprune_mascara_inteligente_prior"],
+                         arrays["vitprune_mascara_fixa_prior"])
+        if detections is not None:
+            timeline_figure(record, stem, detections, min_score)
+    print(f"{len(frame) // len(VARIANTS)} clips, figures in {record.figures}")
+    return workbook

@@ -1,0 +1,167 @@
+"""The benchmark's settings, its record and the commands that drive them.
+
+The commands only translate arguments; what they run is replaced here, so these tests need
+neither a GPU, weights nor a video.
+"""
+
+import json
+
+import pytest
+import torch
+
+from vitprune.pipeline.benchmark.inference import inside_share, refuse_other_runs
+from vitprune.pipeline.benchmark.settings import Benchmark, RunRecord
+from vitprune.pipeline.cli import main
+from vitprune.pipeline.provenance import SourceFile
+
+
+def _benchmark(tmp_path, **changes) -> Benchmark:
+    inputs = {"policy": "policy.json", "region": "region.json", "weights": "w.pth"}
+    return Benchmark(videos=tmp_path / "videos", out=tmp_path / "out", model_source=tmp_path,
+                     **{name: tmp_path / file for name, file in inputs.items()}, **changes)
+
+
+def test_the_share_inside_the_region_ignores_the_padding():
+    region = torch.tensor([1.0, 1.0, 0.0, 0.0])
+    kept = torch.tensor([
+        [[0, 2], [1, 3]],  # two of four kept tokens inside
+        [[0, -1], [1, -1]],  # one per slice, padded to the widest clip; both inside
+    ])
+    assert inside_share(kept, region) == [0.5, 1.0]
+
+
+@pytest.mark.parametrize("changes", [
+    {"precision": "half"}, {"batch": 0}, {"stride": 0}, {"frame_step": 0},
+    {"prune_layer": 41}, {"fixed_rows": 17}, {"fixed_weight": 1.5}, {"show": 0},
+])
+def test_a_run_with_invalid_settings_is_refused_before_anything_loads(tmp_path, changes):
+    with pytest.raises(ValueError):
+        _benchmark(tmp_path, **changes)
+
+
+def test_the_evaluated_videos_are_the_ones_named(tmp_path):
+    (tmp_path / "videos").mkdir()
+    for name in ("a.MP4", "b.mp4", "c.mp4"):
+        (tmp_path / "videos" / name).touch()
+
+    assert [p.stem for p in _benchmark(tmp_path, evaluate=("c", "a")).evaluated()] == ["a", "c"]
+    assert [p.stem for p in _benchmark(tmp_path).evaluated()] == ["a", "b", "c"]
+    with pytest.raises(FileNotFoundError, match="'z'"):
+        _benchmark(tmp_path, evaluate=("a", "z")).evaluated()
+
+
+def test_a_folder_without_videos_is_refused(tmp_path):
+    (tmp_path / "videos").mkdir()
+    with pytest.raises(FileNotFoundError, match="no video found"):
+        _benchmark(tmp_path).evaluated()
+
+
+def test_a_run_of_another_configuration_is_not_resumed(tmp_path):
+    policy, region = tmp_path / "policy.json", tmp_path / "region.json"
+    policy.write_text("{}", encoding="utf-8")
+    region.write_text("{}", encoding="utf-8")
+    record = tmp_path / "run.json"
+    settings = {"stride": 16, "batch": 8}
+
+    refuse_other_runs(record, settings, policy, region)  # nothing to resume yet
+    record.write_text(json.dumps({
+        "settings": settings,
+        "policy": {"sha256": SourceFile.of(policy).sha256},
+        "region": {"sha256": SourceFile.of(region).sha256},
+    }), encoding="utf-8")
+    refuse_other_runs(record, settings, policy, region)
+    with pytest.raises(ValueError, match="another configuration"):
+        refuse_other_runs(record, {**settings, "batch": 4}, policy, region)
+    region.write_text('{"other": 1}', encoding="utf-8")
+    with pytest.raises(ValueError, match="another configuration"):
+        refuse_other_runs(record, settings, policy, region)
+
+
+def test_a_run_of_an_older_version_is_refused(tmp_path):
+    (tmp_path / "run.json").write_text(json.dumps({"schedules": {"v": 3}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="run again"):
+        RunRecord.read(tmp_path)
+
+
+def test_a_record_lists_the_evaluated_videos(tmp_path):
+    video = {"fps": 8.0, "frames": 64, "clips": 4}
+    (tmp_path / "run.json").write_text(json.dumps({"schedules": {"v": video}}), encoding="utf-8")
+    record = RunRecord.read(tmp_path)
+    assert record.stems == ["v"] and record.video("v")["frames"] == 64
+
+
+def test_a_record_needs_a_finished_run(tmp_path):
+    with pytest.raises(FileNotFoundError, match="vitprune benchmark run"):
+        RunRecord.read(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# the commands
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("step", ["run", "ama", "report"])
+def test_every_benchmark_step_has_help(step, capsys):
+    with pytest.raises(SystemExit):
+        main(["benchmark", step, "--help"])
+    assert capsys.readouterr().out
+
+
+def test_benchmark_without_a_step_shows_its_steps(capsys):
+    assert main(["benchmark"]) == 1
+    assert "report" in capsys.readouterr().out
+
+
+def test_the_run_requires_its_inputs(capsys):
+    with pytest.raises(SystemExit):
+        main(["benchmark", "run", "--videos", "v"])
+    err = capsys.readouterr().err
+    assert "--policy" in err and "--region" in err and "--weights" in err
+
+
+def test_the_ama_requires_the_model(capsys):
+    with pytest.raises(SystemExit):
+        main(["benchmark", "ama"])
+    assert "--ama-project" in capsys.readouterr().err
+
+
+def _run_command(tmp_path, *extra) -> list[str]:
+    return ["benchmark", "run", "--videos", str(tmp_path / "videos"),
+            "--policy", "p.json", "--region", "r.json", "--weights", "w.pth",
+            "--model-source", "src", *extra]
+
+
+def test_every_setting_of_the_run_comes_from_its_flags(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")
+    from vitprune.pipeline.benchmark import inference
+
+    seen = []
+    monkeypatch.setattr(inference, "run_benchmark", seen.append)
+    command = _run_command(
+        tmp_path, "--evaluate", "a", "b", "--device", "cpu",
+        "--precision", "bf16", "--batch", "2", "--stride", "8", "--frame-step", "3",
+        "--prune-layer", "4", "--fixed-rows", "2", "--fixed-weight", "0.5", "--out", "o",
+        "--learnable-positions", "--show", "3",
+    )
+
+    assert main(command) == 0
+
+    bench = seen[0]
+    assert (bench.evaluate, bench.device, bench.precision, bench.batch) == (
+        ("a", "b"), "cpu", "bf16", 2)
+    assert (bench.stride, bench.frame_step, bench.prune_layer) == (8, 3, 4)
+    assert bench.fixed_mask == {"rows": 2, "weight": 0.5}
+    assert bench.learnable_positions and bench.show == 3
+    assert str(bench.out) == "o"
+    assert (str(bench.policy), str(bench.region)) == ("p.json", "r.json")
+    assert (str(bench.weights), str(bench.model_source)) == ("w.pth", "src")
+
+
+def test_a_run_of_another_configuration_is_reported_as_an_error(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("cv2")
+    from vitprune.pipeline.benchmark import inference
+
+    def refuse(bench):
+        raise ValueError("holds results of another configuration")
+
+    monkeypatch.setattr(inference, "run_benchmark", refuse)
+    assert main(_run_command(tmp_path)) == 2
+    assert "another configuration" in capsys.readouterr().err

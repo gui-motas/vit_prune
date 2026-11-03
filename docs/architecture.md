@@ -105,6 +105,7 @@ models.
 | `extraction` | walking a folder and writing embeddings in the expected format |
 | `provenance` | recording the conditions each result was produced under |
 | `evaluation` | running a trained downstream model on the embeddings |
+| `benchmark` | the experiment: the variants over videos, the AMA on their features, the report against the dense run |
 | `cli` | translating arguments and printing |
 
 ### Decisions worth recording

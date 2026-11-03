@@ -113,8 +113,8 @@ stays installable on its own.
 ## Command line
 
 The base installation registers `vitprune`; video reading and evaluation require
-the `pipeline` extra, and `region` the `region` extra. The CLI uses the Giant
-geometry; Python callers choose theirs.
+the `pipeline` extra, `region` the `region` extra and `benchmark report` the `benchmark`
+extra. The CLI uses the Giant geometry; Python callers choose theirs.
 
 ```bash
 vitprune cost      --tokens 256 512 768             # analytic estimate, no GPU needed
@@ -126,7 +126,14 @@ vitprune drift     --videos data/ --weights w.pth --model-source /path --policy 
 vitprune run       --video clip.mp4 --weights w.pth --model-source /path --policy policy.json
 vitprune extract   --videos data/ --weights w.pth --model-source /path --policy policy.json --region region.json --out feats/
 vitprune evaluate  --features feats/ --downstream-project /path --downstream-config config.yaml --downstream-weights best.pth --out runs/eval
+vitprune benchmark run    --videos eval/ --policy policy.json --region region.json --weights w.pth --model-source /path --out outputs/benchmark
+vitprune benchmark ama    --out outputs/benchmark --ama-project /path/AMA --ama-config config.yaml --ama-weights best.pth
+vitprune benchmark report --out outputs/benchmark
 ```
+
+`benchmark` needs no annotation: it runs the dense backbone and three ViT-Prune variants,
+then the AMA on each, and the report compares every variant with the dense run, which is
+the reference. That measures how much pruning changes the result, not whether it is right.
 
 `cost` needs the base dependencies, but no GPU, weights or video. Model commands
 automatically check dense equivalence before running. Without `--policy`, `run` and

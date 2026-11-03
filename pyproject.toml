@@ -26,6 +26,15 @@ pipeline = [
 region = [
     "ultralytics>=8.4",
 ]
+# `vitprune benchmark`: the variants over videos and the report. The AMA runs
+# in its own environment; see docs/operations.md.
+benchmark = [
+    "opencv-python>=4.8",
+    "PyYAML>=6.0",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "matplotlib>=3.7",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

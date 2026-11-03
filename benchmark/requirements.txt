@@ -1,4 +1,4 @@
-# Everything the benchmark scripts import, in one environment, next to
+# Everything `vitprune benchmark` imports, in one environment, next to
 #   pip install -e ".[pipeline,region]"
 # from the repository root, which brings Ultralytics for vitprune region. On a CUDA
 # machine install torch and torchvision from the PyTorch index for that CUDA version first.
@@ -11,7 +11,7 @@ timm
 pandas
 openpyxl
 matplotlib
-# AMA localizer (evaluate_ama.py)
+# AMA localizer (`vitprune benchmark ama`, which runs under the AMA's own interpreter)
 loguru
 transformers
 joblib

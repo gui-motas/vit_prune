@@ -2,8 +2,8 @@
 
 Install the local checkout with `pip install -e ".[pipeline,dev]"`. Base dependencies
 are NumPy and Torch; `pipeline` adds OpenCV, which decodes every video, and PyYAML;
-`region` adds Ultralytics for the person detector. The old `torch` extra no longer
-exists.
+`region` adds Ultralytics for the person detector; `benchmark` adds pandas, openpyxl and
+matplotlib for the report. The old `torch` extra no longer exists.
 
 ## Commands
 
@@ -17,6 +17,9 @@ vitprune drift --videos data/ --weights w.pth --model-source /path/to/videomae -
 vitprune run --video clip.mp4 --weights w.pth --model-source /path/to/videomae --policy policy.json --out outputs/clip --compare
 vitprune extract --videos data/ --weights w.pth --model-source /path/to/videomae --policy policy.json --out features/adaptive --stride 16 --frame-step 2
 vitprune evaluate --features features/adaptive --downstream-project /path/to/localizer --downstream-config config.yaml --downstream-weights best.pth --frame-step 2 --out runs/adaptive
+vitprune benchmark run --videos eval/ --policy policy.json --region region.json --weights w.pth --model-source /path/to/videomae --out outputs/benchmark
+vitprune benchmark ama --out outputs/benchmark --ama-project /path/to/AMA --ama-config config.yaml --ama-weights best.pth
+vitprune benchmark report --out outputs/benchmark
 ```
 
 `calibrate` measures redundancy and motion on calibration videos, running only the
@@ -45,6 +48,40 @@ detector Ultralytics loads, such as
 `--policy` and excludes `--prior-top-rows`. A region file is never overwritten and is
 refused for a backbone with another grid.
 
+`benchmark` is the experiment in three steps, each reading what the one before wrote
+under `--out` (default `outputs/benchmark`). It needs no annotation: the dense pipeline is
+the reference, and each variant is compared with what the dense gave.
+
+- `benchmark run` puts every clip of the evaluated videos through the dense backbone and
+  three ViT-Prune variants that share one policy: no mask, a fixed mask over the top
+  rows, and the driver region. `--videos` holds the evaluated videos, and `--evaluate
+  STEM ...` picks some of them, by name without extension. `--policy` and `--region` come
+  from `calibrate` and `region`, run on other videos. The policy is refused when
+  `--prune-layer`, `--frame-step` or the checkpoint differ from the ones it was calibrated
+  with; use the same `--stride` and `--precision` too, which are not checked.
+  `--fixed-rows` and `--fixed-weight` shape the fixed mask, and `--show N` keeps N clips
+  per video, spread over it, for the figures. A video is written whole or redone, so an
+  interrupted run resumes with the same command; a folder holding another policy, region
+  or setting is refused.
+- `benchmark ama` runs the AMA temporal localizer, the pipeline's next stage, on each
+  variant's features. It does not use the AMA's `eval.py`, which compares detections with
+  annotations: the model runs from `ama_infer.py`, a script started in the AMA's folder
+  under `--ama-python`, the interpreter of the AMA's environment (default: the one
+  running vitprune; vitprune need not be installed in the other). A pure-Python
+  `nms_1d_cpu` stands in for the AMA's compiled extension. The weights must match the
+  model exactly. A variant already run is refused, before anything starts.
+- `benchmark report` writes `benchmark-vitprune.xlsx` and the figures in `figuras/`. It
+  works without `benchmark ama`, only without the detection columns. Per variant it gives
+  the share of clips where the head's class is the dense one's; and, for the detections of
+  the dense run from `--min-score` up, the share each variant finds again with the same
+  class and a tIoU of `--tiou` or more (recall), the share of its own detections the
+  dense run confirms (precision) and the mean best tIoU. These measure how much pruning
+  changes the dense result, not whether that result is right: where the dense is wrong, a
+  variant that is wrong the same way agrees.
+
+`benchmark ama` and `benchmark report` take the evaluated videos and the sampling from
+the `run.json` the first step wrote.
+
 `check`, `latency`, `drift`, `run` and `extract` support `--device cpu` and require
 an external Giant backbone exposing `forward_features`. All verify dense equivalence
 before application. The startup probe is outside benchmark timing.
@@ -60,6 +97,12 @@ No command here recognises actions directly: `evaluate` invokes the external mod
 - `region`: the region file, with the grid, the region, its box and, per calibration
   video, how many clips found the driver and the crop, plus the detection rule and the
   detector weights.
+- `benchmark run`: under `--out`, `run.json` (inputs, checksums, settings and the clips of
+  each video), `clips.jsonl` (one row per clip and variant), `features/VARIANT/` in the
+  `extract` format with its manifest, and the tokens kept and frames the figures use.
+  `benchmark ama` adds `ama/`: per variant `predictions.csv` (`video-id`, `t-start`,
+  `t-end`, `label`, `score`, in seconds) and `ama-manifest.json`, plus `job.json` and
+  `downstream.log`; `benchmark report` the workbook and `figuras/`.
 - `run`: `VIDEO.npz`, `report.json`, `manifest.json`.
 - `extract`: one `VIDEO.npz` per video and `manifest.json`. With a policy, the
   manifest records the policy and, per video, each clip's tokens, regime, redundancy

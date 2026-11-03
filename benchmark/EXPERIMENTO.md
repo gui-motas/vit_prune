@@ -8,9 +8,12 @@ política e da região.
 
 ## Perguntas
 
-1. A máscara inteligente (região do motorista) preserva mais que a máscara fixa?
-2. O ViT-Prune mantém o resultado do denso na ação inteira?
-3. Quantos tokens ficam após a poda, onde ficam e quanto isso economiza?
+Sem labels: a referência é o pipeline denso, e a concordância com ele não é acerto (se o
+denso errar, a variante que erra igual concorda).
+
+1. O ViT-Prune mantém as respostas do denso, na cabeça de classificação e nas detecções do AMA?
+2. A máscara inteligente (região do motorista) mantém mais que a máscara fixa?
+3. Quantos tokens ficam após a poda, onde ficam e quanto tempo isso economiza?
 
 ## Dados
 
@@ -20,7 +23,7 @@ política e da região.
 | Vídeos de calibração | 16 _(listar)_ |
 | Trechos por vídeo na calibração | 160, espaçados pelo vídeo |
 | Vídeos avaliados | `Dashboard_user_id_13522_NoAudio_5`, `Dashboard_user_id_13522_NoAudio_7` |
-| Anotação | `videos/class-intervals.json`: 16 classes, 16 ações por vídeo |
+| Anotação | nenhuma: a referência é o denso |
 | Entrada do modelo | quadro inteiro (1920x1080) redimensionado para 224x224 |
 | Clipe | 16 quadros com passo 2 (32 quadros, cerca de 1 s), um a cada 16 quadros |
 | Duração total avaliada | _(a preencher)_ |
@@ -57,7 +60,7 @@ Nenhum modelo é retreinado: o ViT-Prune só calibra a política e a região.
 | timm, ultralytics, opencv-python, numpy | _(a preencher)_ |
 | Commit do vitprune (branch `benchmark`) | _(a preencher)_ |
 | Commit do AMA | _(a preencher)_ |
-| Precisão e lote | `precision` e `batch` do `settings.json` |
+| Precisão e lote | `--precision` e `--batch` do `vitprune benchmark run`, registrados no `run.json` |
 
 `pip freeze > results/pip-freeze.txt`, no ambiente usado, guarda todas as versões.
 
@@ -71,9 +74,13 @@ sem os vídeos avaliados. O `yolo26s.pt` vem de
 ```powershell
 vitprune calibrate --videos <calibracao> --weights <videomae.pth> --model-source <feature_extraction> --levels 256 512 768 --clips-per-video 160 --precision off --device cuda --out benchmark/results/policy.json
 vitprune region --videos <calibracao> --detector yolo26s.pt --clips-per-video 160 --device cuda --out benchmark/results/region.json
-python benchmark/run_inference.py
-python benchmark/evaluate_ama.py
-python benchmark/make_report.py
+vitprune benchmark run --videos <avaliados> --evaluate Dashboard_user_id_13522_NoAudio_5 Dashboard_user_id_13522_NoAudio_7 --policy benchmark/results/policy.json --region benchmark/results/region.json --weights <videomae.pth> --model-source <feature_extraction> --precision off --batch 8 --device cuda --out benchmark/results
+vitprune benchmark ama --out benchmark/results --ama-project <AMA> --ama-config <AMA>/configs/aicity_ego_vitl.yaml --ama-weights <AMA>/ckpt/aicity_ego_vitl_ckpt/best_performance.pth.tar --ama-python <AMA-env>/bin/python
+vitprune benchmark report --out benchmark/results
 ```
 
-`--precision` do `calibrate` deve ser o mesmo `precision` do `settings.json`.
+A política é recusada se `--prune-layer`, `--frame-step` ou o checkpoint do `benchmark run`
+diferirem dos do `calibrate`; `--stride` e `--precision` devem ser os mesmos, mas não são
+conferidos. O `benchmark ama` não usa o `eval.py` do AMA: roda o modelo direto sobre as features,
+com o Python do ambiente do AMA (`--ama-python`), que não precisa ter o vitprune. Cada etapa lê o
+que a anterior gravou em `--out`; todos os parâmetros têm `--help`.

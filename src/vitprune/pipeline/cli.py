@@ -12,6 +12,9 @@ Commands for integration, measurement and application:
 * ``extract`` -- produce embeddings for a whole folder. The expensive stage. Without a
   policy it produces the dense baseline.
 * ``evaluate`` -- run a trained downstream model on the embeddings.
+* ``benchmark`` -- the experiment, in three steps: ``run`` the variants over videos,
+  ``ama`` to run the AMA on each variant's features, ``report`` for the spreadsheet and
+  figures, comparing each variant with the dense run. No annotation is needed.
 
 The ordering is not arbitrary. Each command depends on less than the next, which
 means results can be produced from the first day, before a dataset is available.
@@ -31,6 +34,8 @@ from vitprune import __version__
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 
 RULE = "=" * 78
+#: Where the three benchmark steps read and write unless told otherwise.
+BENCHMARK_OUT = "outputs/benchmark"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -428,6 +433,71 @@ def _run_evaluate(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# benchmark
+# ---------------------------------------------------------------------------
+def _run_benchmark_run(args) -> int:
+    from vitprune.pipeline.benchmark.inference import run_benchmark
+    from vitprune.pipeline.benchmark.settings import Benchmark
+
+    bench = Benchmark(
+        videos=args.videos,
+        out=args.out,
+        policy=args.policy,
+        region=args.region,
+        weights=args.weights,
+        model_source=args.model_source,
+        evaluate=args.evaluate or (),
+        device=args.device,
+        precision=args.precision,
+        batch=args.batch,
+        stride=args.stride,
+        frame_step=args.frame_step,
+        prune_layer=args.prune_layer,
+        fixed_rows=args.fixed_rows,
+        fixed_weight=args.fixed_weight,
+        show=args.show,
+        learnable_positions=args.learnable_positions,
+    )
+
+    print(RULE)
+    print("the dense backbone and three ViT-Prune variants, on every clip")
+    print("evaluated videos must not be among the calibration videos")
+    print(RULE)
+    run_benchmark(bench)
+    return 0
+
+
+def _run_benchmark_ama(args) -> int:
+    from vitprune.pipeline.benchmark.ama import run_ama
+
+    print(RULE)
+    print("the AMA on the features of each variant, no weight altered")
+    print(RULE)
+    run_ama(args.out, args.ama_project, args.ama_config, args.ama_weights, args.ama_python)
+    return 0
+
+
+def _run_benchmark_report(args) -> int:
+    try:
+        from vitprune.pipeline.benchmark.report import make_report
+    except ImportError as error:
+        raise RuntimeError(
+            "the report needs pandas, openpyxl and matplotlib: pip install 'vitprune[benchmark]'"
+        ) from error
+
+    make_report(args.out, args.min_score, args.tiou)
+    return 0
+
+
+def _without_step(parser: argparse.ArgumentParser):
+    def handler(args) -> int:
+        parser.print_help()
+        return 1
+
+    return handler
+
+
+# ---------------------------------------------------------------------------
 # shared
 # ---------------------------------------------------------------------------
 def _load_backbone(args):
@@ -693,6 +763,84 @@ def _build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--out", required=True)
     evaluate.add_argument("--extra", nargs=argparse.REMAINDER)
     evaluate.set_defaults(handler=_run_evaluate)
+
+    benchmark = commands.add_parser(
+        "benchmark",
+        help="the experiment: the variants on videos, the AMA, the report against the dense run",
+    )
+    benchmark.set_defaults(handler=_without_step(benchmark))
+    steps = benchmark.add_subparsers(dest="step")
+
+    bench_run = steps.add_parser("run", help="every clip through the dense and pruned variants")
+    bench_run.add_argument(
+        "--videos", required=True,
+        help="the videos under evaluation (a folder or a file), not the calibration videos",
+    )
+    bench_run.add_argument(
+        "--evaluate", nargs="+", metavar="STEM",
+        help="names of the videos to evaluate, without extension (default: every video)",
+    )
+    bench_run.add_argument("--policy", required=True, help="written by 'vitprune calibrate'")
+    bench_run.add_argument("--region", required=True, help="written by 'vitprune region'")
+    _add_model_arguments(bench_run)
+    bench_run.add_argument(
+        "--out", default=BENCHMARK_OUT, help="results folder (default: %(default)s)"
+    )
+    bench_run.add_argument(
+        "--stride", type=int, default=16, help="frames between clips (default: 16)"
+    )
+    bench_run.add_argument(
+        "--frame-step", type=int, default=2, help="take every Nth frame within a clip (default: 2)"
+    )
+    bench_run.add_argument("--batch", type=int, default=8)
+    bench_run.add_argument(
+        "--precision", default="off", choices=["fp16", "bf16", "off"],
+        help="off is fp32, as the AI City extraction ran; calibrate with the same (default: off)",
+    )
+    bench_run.add_argument(
+        "--prune-layer", type=int, default=2, help="prune after this block (default: 2)"
+    )
+    bench_run.add_argument(
+        "--fixed-rows", type=int, default=4,
+        help="rows from the top the fixed mask lowers (default: 4)",
+    )
+    bench_run.add_argument(
+        "--fixed-weight", type=float, default=0.15,
+        help="multiplier the fixed mask applies to those rows (default: 0.15)",
+    )
+    bench_run.add_argument(
+        "--show", type=int, default=6,
+        help="clips per video kept for the figures, spread over it (default: 6)",
+    )
+    bench_run.set_defaults(handler=_run_benchmark_run)
+
+    bench_ama = steps.add_parser("ama", help="the AMA on each variant's features")
+    bench_ama.add_argument(
+        "--out", default=BENCHMARK_OUT, help="results folder of 'run' (default: %(default)s)"
+    )
+    bench_ama.add_argument("--ama-project", required=True, help="folder holding the AMA")
+    bench_ama.add_argument("--ama-config", required=True, help="the AMA's configuration")
+    bench_ama.add_argument("--ama-weights", required=True, help="the AMA's trained weights")
+    bench_ama.add_argument(
+        "--ama-python",
+        help="interpreter of the AMA's environment, if not the one running vitprune",
+    )
+    bench_ama.set_defaults(handler=_run_benchmark_ama)
+
+    bench_report = steps.add_parser("report", help="the spreadsheet and the figures")
+    bench_report.add_argument(
+        "--out", default=BENCHMARK_OUT, help="results folder of 'run' (default: %(default)s)"
+    )
+    bench_report.add_argument(
+        "--min-score", type=float, default=0.3,
+        help="detections below this confidence are left out, in the dense reference and in "
+             "each variant (default: 0.3)",
+    )
+    bench_report.add_argument(
+        "--tiou", type=float, default=0.5,
+        help="overlap at which a variant's detection matches one of the dense (default: 0.5)",
+    )
+    bench_report.set_defaults(handler=_run_benchmark_report)
 
     return parser
 

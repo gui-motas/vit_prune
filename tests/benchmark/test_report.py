@@ -1,123 +1,226 @@
-"""The code that turns benchmark runs into the thesis tables: where the kept tokens fall,
-which detection answers each action, the class of each action read whole, and what the
-AMA is scored against.
+"""The report, which reads every variant against the dense one: how much of the dense
+pipeline's answer each variant keeps in the classification head and in the AMA's detections.
 
-Skipped without the benchmark's own dependencies (pandas, matplotlib).
+Skipped without the report's own dependencies (pandas, matplotlib); the tests that write
+the workbook also need openpyxl.
 """
 
 import json
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
 
 pd = pytest.importorskip("pandas")
 pytest.importorskip("matplotlib")
-pytest.importorskip("cv2")
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmark"))
 
-import evaluate_ama  # noqa: E402
-import make_report  # noqa: E402
-import run_inference  # noqa: E402
-from common import VARIANTS  # noqa: E402
+from matplotlib import pyplot as plt  # noqa: E402
 
+from vitprune.pipeline.benchmark import report  # noqa: E402
+from vitprune.pipeline.benchmark.settings import VARIANTS  # noqa: E402
+from vitprune.pipeline.cli import main  # noqa: E402
 
-def test_the_share_inside_the_region_ignores_the_padding():
-    region = torch.tensor([1.0, 1.0, 0.0, 0.0])
-    kept = torch.tensor([
-        [[0, 2], [1, 3]],  # two of four kept tokens inside
-        [[0, -1], [1, -1]],  # one per slice, padded to the widest clip; both inside
-    ])
-    assert run_inference.inside_share(kept, region) == [0.5, 1.0]
+DENSE, FIXED = "Sem ViT-Prune (denso, referência)", "ViT-Prune + máscara fixa"
+RECALL = "Detecções do denso reencontradas (recall)"
+CLASSES = "Concordância de classe com o denso"
 
 
-def _detections(rows):
+def _d(rows):
     return pd.DataFrame(rows, columns=["video-id", "t-start", "t-end", "label", "score"])
 
 
-def test_an_action_is_answered_by_the_most_confident_detection_of_its_class():
-    detections = _detections([
-        ["v", 10.0, 20.0, 3, 0.4],  # aligned, less confident
-        ["v", 15.0, 25.0, 3, 0.9],  # half overlapping, the most confident
-        ["v", 10.0, 20.0, 5, 0.99],  # another class
-        ["w", 10.0, 20.0, 3, 0.95],  # another video
-        ["v", 30.0, 40.0, 3, 0.97],  # elsewhere
-    ])
-    tiou, score = make_report.match(detections, "v", {"label_id": 3, "start": 10.0, "end": 20.0})
-    assert score == 0.9
-    assert tiou == pytest.approx(5 / 15)
+def test_best_tiou_pairs_each_detection_with_its_best_same_class_overlap():
+    reference = _d([["v", 10, 20, 3, .9], ["v", 30, 40, 3, .9], ["w", 0, 5, 3, .9]])
+    found = _d([["v", 15, 25, 3, .4], ["v", 10, 20, 5, .9], ["v", 12, 20, 3, .1]])
+
+    assert report.best_tiou(reference, found) == pytest.approx([0.8, 0.0, 0.0])
 
 
-def test_an_action_nothing_overlaps_is_not_answered():
-    detections = _detections([["v", 30.0, 40.0, 3, 0.9]])
-    assert make_report.match(detections, "v", {"label_id": 3, "start": 0.0, "end": 10.0}) is None
+def test_agreement_counts_what_the_variant_finds_and_what_it_invents():
+    reference = _d([["v", 10, 20, 3, .9], ["v", 30, 40, 3, .9],
+                    ["v", 10, 20, 3, .1]])  # the last is below the floor
+    found = _d([["v", 10, 21, 3, .8], ["v", 50, 60, 2, .7]])
+
+    got = report.agreement(reference, found, tiou=0.5, min_score=0.3)
+
+    assert (got["recall"], got["precision"]) == (0.5, 0.5)
+    assert got["mean_tiou"] == pytest.approx((10 / 11) / 2)
 
 
-def test_each_action_is_classified_from_all_its_clips(tmp_path, monkeypatch):
-    """Rows arrive in any order; the features are in clip order and must line up."""
-    annotated = [{"label_id": 1, "label": "Drinking", "start": 0.0, "end": 2.0},
-                 {"label_id": 2, "label": "Eating", "start": 2.0, "end": 4.0}]
-    monkeypatch.setattr(make_report, "RESULTS", tmp_path)
-    monkeypatch.setattr(make_report, "videos", lambda: [Path("v.mp4")])
-    monkeypatch.setattr(make_report, "segments", lambda stem: annotated)
-    monkeypatch.setattr(make_report, "class_names", lambda: {0: "Other", 1: "Drinking",
-                                                              2: "Eating"})
-    starts, owners = [0, 16, 32, 48], [0, 0, 1, None]
-    right = np.array([[0.1, 0.8, 0.1], [0.2, 0.5, 0.3], [0.1, 0.2, 0.7], [1.0, 0.0, 0.0]])
-    wrong = right[:, [1, 0, 2]]  # the first action now reads as "Other"
-    rows = []
+def test_a_variant_that_finds_nothing_has_zero_recall_and_no_precision():
+    got = report.agreement(_d([["v", 10, 20, 3, .9]]), _d([]))
+    assert (got["recall"], got["precision"], got["mean_tiou"]) == (0.0, None, 0.0)
+
+
+def test_a_dense_run_without_detections_leaves_recall_undefined():
+    got = report.agreement(_d([]), _d([["v", 10, 20, 3, .9]]))
+    assert (got["recall"], got["mean_tiou"], got["precision"]) == (None, None, 0.0)
+
+
+def test_class_agreement_is_the_share_of_clips_with_the_dense_class():
+    dense = np.eye(3)[[0, 1, 2, 0]]
+
+    assert report.class_agreement(dense, np.eye(3)[[0, 1, 1, 0]]) == 0.75
+    with pytest.raises(ValueError, match="clips"):
+        report.class_agreement(dense, dense[:3])
+
+
+def test_the_class_in_a_window_averages_the_clips_wholly_inside_it():
+    # Inside (0, 4): the first three clips, averaging to [1/3, 2/3]. The last one ends at 5 s;
+    # counted, it would tie the average at [1/2, 1/2] and give class 0.
+    probabilities = np.array([[.8, .2], [.1, .9], [.1, .9], [1., 0.]])
+    starts = np.array([0., 1., 2., 3.])  # clips of 2 s
+
+    assert report.window_class(probabilities, starts, 2.0, (0.0, 4.0)) == 1
+    assert report.window_class(probabilities, starts, 2.0, (10.0, 12.0)) is None
+
+
+def _synthetic_run(tmp_path, with_ama=True, dense_detections=True, stems=("v",)):
+    """A finished run of 4 clips of each video, with the dense and the fixed-mask variants
+    disagreeing on one clip and on one detection."""
+    out = tmp_path / "run"
+    grid, slices = report.GRID, report.GEOMETRY.temporal_slices
+    rng = np.random.default_rng(0)
+    starts, rows = [0, 16, 32, 48], []
     for variant in VARIANTS:
-        probabilities = wrong if variant == "vitprune" else right
-        (tmp_path / "features" / variant).mkdir(parents=True)
-        np.savez(tmp_path / "features" / variant / "v.npz", a_prob=probabilities)
-        rows += [{"video": "v", "variant": variant, "start_frame": starts[i],
-                  "segment": owners[i], "tokens": 256 * (i + 1)} for i in (2, 0, 3, 1)]
-    detections = {variant: _detections([["v", 0.0, 2.0, 1, 0.8]]) for variant in VARIANTS}
+        (out / "features" / variant).mkdir(parents=True)
+        for stem in stems:
+            for start in starts:
+                rows.append({"video": stem, "start_frame": start, "start_s": start / 8,
+                             "variant": variant, "tokens": 2048 if variant == "denso" else 512,
+                             "regime": None if variant == "denso" else 1,
+                             "inside_region": None if variant == "denso" else 0.8,
+                             "cosine_to_dense": 0.95,
+                             "seconds": 1.0 if variant == "denso" else 0.4})
+            classes = [0, 1, 0, 2] if variant == "vitprune_mascara_fixa" else [0, 1, 1, 2]
+            np.savez(out / "features" / variant / f"{stem}.npz",
+                     a_prob=np.eye(3)[classes] * 0.8 + 0.1, feats=np.zeros((4, 6)))
+    (out / "clips.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
 
-    table = make_report.actions(pd.DataFrame(rows), detections).set_index("Ação")
+    smart = np.zeros((grid, grid))
+    smart[4:, 1:14] = 1
+    fixed = np.ones((grid, grid))
+    fixed[:4] = 0.15
+    (out / "selection").mkdir()
+    for stem in stems:
+        (out / "frames" / stem).mkdir(parents=True)
+        for start in (0, 48):
+            arrays = {f"{v}_kept": rng.random((slices, grid * grid)) < 0.25 for v in VARIANTS[1:]}
+            arrays["vitprune_mascara_fixa_prior"] = fixed.flatten()
+            arrays["vitprune_mascara_inteligente_prior"] = smart.flatten()
+            np.savez_compressed(out / "selection" / f"{stem}_{start:06d}.npz", **arrays)
+            plt.imsave(out / "frames" / stem / f"{start:06d}.jpg", rng.random((108, 192, 3)))
 
-    assert table.loc["Drinking", "Denso: classe no trecho"] == "Drinking"
-    assert table.loc["Drinking", "Denso: acerto"]
-    assert not table.loc["Drinking", "Sem máscara: acerto"]
-    assert table.loc["Eating", "Sem máscara: acerto"]
-    assert table.loc["Drinking", "Clipes no trecho"] == 2
-    assert table.loc["Drinking", "Tokens médios (ViT-Prune)"] == 384
-    assert table.loc["Drinking", "Denso: AMA tIoU"] == 1.0
-    assert table.loc["Eating", "Denso: AMA tIoU"] == 0.0
+    if with_ama:
+        def both(stem):
+            return [[stem, 0.0, 10.0, 1, .9], [stem, 4.0, 8.0, 2, .8]]
 
+        for variant in VARIANTS:
+            lines = [line for stem in stems for line in (
+                both(stem)[:1] if variant == "vitprune_mascara_fixa"
+                else [] if variant == "denso" and not dense_detections else both(stem))]
+            (out / "ama" / variant).mkdir(parents=True)
+            _d(lines).to_csv(out / "ama" / variant / "predictions.csv", index=False)
 
-def test_the_ama_is_scored_on_the_evaluated_videos_only(tmp_path, monkeypatch):
-    """The AMA skips a video without features but would count its actions as missed."""
-    database = {"database": {"evaluated": {"annotations": []}, "other": {"annotations": []}}}
-    monkeypatch.setattr(evaluate_ama, "annotations", lambda: database)
-    monkeypatch.setattr(evaluate_ama, "RESULTS", tmp_path)
-    monkeypatch.setitem(evaluate_ama.SETTINGS, "evaluate", ["evaluated"])
-
-    written = json.loads(evaluate_ama.labels().read_text(encoding="utf-8"))["database"]
-
-    assert written == {"evaluated": {"annotations": [], "subset": "validation"}}
-
-
-def test_a_run_of_another_configuration_is_not_resumed(tmp_path, monkeypatch):
-    policy, region = tmp_path / "policy.json", tmp_path / "region.json"
-    policy.write_text("{}", encoding="utf-8")
-    region.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(run_inference, "POLICY", policy)
-    monkeypatch.setattr(run_inference, "REGION", region)
-    record = tmp_path / "run.json"
-    settings = {"stride": 16, "batch": 8}
-
-    run_inference.refuse_other_runs(record, settings)  # nothing to resume yet
-    record.write_text(json.dumps({
-        "settings": settings,
-        "policy": {"sha256": run_inference.SourceFile.of(policy).sha256},
-        "region": {"sha256": run_inference.SourceFile.of(region).sha256},
+    (out / "policy.json").write_text(json.dumps({
+        "policy": {"version": "p1", "levels": [256, 512, 768], "thresholds": [0.3, 0.6]},
+        "calibration": {"clips": 100, "videos": [{}, {}]},
     }), encoding="utf-8")
-    run_inference.refuse_other_runs(record, settings)
-    with pytest.raises(SystemExit, match="another configuration"):
-        run_inference.refuse_other_runs(record, {**settings, "batch": 4})
-    region.write_text('{"other": 1}', encoding="utf-8")
-    with pytest.raises(SystemExit, match="another configuration"):
-        run_inference.refuse_other_runs(record, settings)
+    (out / "region.json").write_text(json.dumps({
+        "region": {"grid_size": grid, "prior": smart.flatten().tolist()},
+        "calibration": {"area": float(smart.mean()), "detected": 90, "clips": 100,
+                        "videos": [{}, {}],
+                        "detector": {"version": "8.4", "weights": {"path": "/x/yolo26s.pt"}}},
+    }), encoding="utf-8")
+    (out / "run.json").write_text(json.dumps({
+        "check": "dense path matches", "weights": {"path": "/x/w.pth", "sha256": "abc"},
+        "model_source": "/x/src", "policy": {"path": str(out / "policy.json")},
+        "region": {"path": str(out / "region.json")},
+        "environment": {"python": "3.10", "torch": "2.x", "gpu": "Orin"},
+        "settings": {"device": "cuda", "precision": "off", "batch": 8, "prune_layer": 2,
+                     "stride": 16, "frame_step": 2, "fixed_mask": {"rows": 4, "weight": 0.15}},
+        "schedules": {stem: {"fps": 8.0, "frames": 64, "clips": 4} for stem in stems},
+    }), encoding="utf-8")
+    return out
+
+
+def test_the_report_without_labels_compares_every_variant_with_the_dense(tmp_path):
+    pytest.importorskip("openpyxl")
+    out = _synthetic_run(tmp_path)
+
+    book = pd.ExcelFile(report.make_report(out))
+
+    assert book.sheet_names == ["Resumo", "Por detecção do denso", "Por vídeo", "Configuração"]
+    summary = book.parse("Resumo").set_index("Variante")
+    assert summary.loc[DENSE, RECALL] == 1.0 and summary.loc[DENSE, CLASSES] == 1.0
+    assert summary.loc[FIXED, RECALL] == 0.5 and summary.loc[FIXED, CLASSES] == 0.75
+    assert summary.loc[FIXED, "Speedup medido"] == pytest.approx(2.5)
+    columns = [str(c) for sheet in book.sheet_names for c in book.parse(sheet).columns]
+    assert not any("acerto" in c.lower() or "mAP" in c for c in columns)
+    detections = book.parse("Por detecção do denso")
+    assert detections["Classe"].tolist() == ["classe 1", "classe 2"]
+    assert detections["Máscara fixa: melhor tIoU"].tolist() == [1.0, 0.0]
+    notes = book.parse("Configuração").set_index("Item")["Valor"]
+    assert "acerto" in notes["Nota: referência"]  # says what the agreement is not
+    figures = out / "figuras"
+    assert (figures / "resumo.png").exists() and (figures / "linha-do-tempo-v.png").exists()
+    assert (figures / "mascaras-v.png").exists()
+    assert len(list(figures.glob("selecao-*.png"))) == 2  # clips 0 and 48 of the one video
+
+
+def test_the_report_without_the_ama_still_writes_the_head_and_time_columns(tmp_path):
+    pytest.importorskip("openpyxl")
+    out = _synthetic_run(tmp_path, with_ama=False)
+
+    summary = pd.ExcelFile(report.make_report(out)).parse("Resumo")
+
+    assert CLASSES in summary.columns and "Speedup medido" in summary.columns
+    assert RECALL not in summary.columns
+    assert not (out / "figuras" / "linha-do-tempo-v.png").exists()
+
+
+def test_a_dense_run_without_detections_still_gives_a_report(tmp_path):
+    pytest.importorskip("openpyxl")
+    out = _synthetic_run(tmp_path, dense_detections=False)
+
+    book = pd.ExcelFile(report.make_report(out))
+
+    assert book.parse("Por detecção do denso").empty
+    assert book.parse("Resumo").set_index("Variante").loc[DENSE, CLASSES] == 1.0
+
+
+def test_the_report_needs_a_finished_run(tmp_path, capsys):
+    assert main(["benchmark", "report", "--out", str(tmp_path)]) == 2
+    assert "vitprune benchmark run" in capsys.readouterr().err
+
+
+def test_the_report_step_takes_its_thresholds_from_its_flags(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        report, "make_report",
+        lambda out, min_score, tiou: seen.update(out=out, min_score=min_score, tiou=tiou),
+    )
+
+    assert main(["benchmark", "report", "--out", "o", "--min-score", "0.4", "--tiou", "0.6"]) == 0
+
+    assert seen == {"out": "o", "min_score": 0.4, "tiou": 0.6}
+
+
+def test_the_selection_figures_of_videos_with_the_same_name_ending_do_not_overwrite_each_other(
+    tmp_path,
+):
+    pytest.importorskip("openpyxl")
+    out = _synthetic_run(tmp_path, stems=("Dashboard_NoAudio_5", "Other_NoAudio_5"))
+
+    report.make_report(out)
+
+    names = sorted(p.name for p in (out / "figuras").glob("selecao-*.png"))
+    assert names == ["selecao-Dashboard_NoAudio_5-000000.png",
+                     "selecao-Dashboard_NoAudio_5-000048.png",
+                     "selecao-Other_NoAudio_5-000000.png",
+                     "selecao-Other_NoAudio_5-000048.png"]
+
+
+def test_the_dense_row_says_it_is_the_reference():
+    assert report.NAMES["denso"] == DENSE
+    assert report.short_label("denso") == "Denso (referência)"
+    assert report.short_label("vitprune") == "Sem máscara"
