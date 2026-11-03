@@ -8,10 +8,12 @@ only the results folder.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer
+from vitprune.core.policy import FixedBudget
 from vitprune.core.priors import top_rows_prior
 from vitprune.pipeline.video import _clip_starts, clip_span, find_videos
 
@@ -22,6 +24,9 @@ GEOMETRY = ClipGeometry.videomae_giant()
 #: tokens per clip; the masks only change which ones.
 VARIANTS = ("denso", "vitprune", "vitprune_mascara_fixa", "vitprune_mascara_inteligente")
 
+#: Names the policy study gives its own variants, never a policy file passed by name.
+RESERVED = ("denso", "legacy_original")
+
 #: Written by the run, read by the AMA step and the report.
 RUN_RECORD = "run.json"
 
@@ -30,10 +35,18 @@ RUN_RECORD = "run.json"
 class Benchmark:
     """Everything that defines one run of the variants over the evaluated videos.
 
+    Two studies share the run. The mask study compares the dense VideoMAE with ViT-Prune
+    without a mask, with the fixed mask and with the driver region, under ``policy``. The
+    policy study, chosen by giving ``policies``, ``fixed`` or ``proportional``, compares
+    budgets instead, all without a mask: the dense VideoMAE, ``policy`` when given (as
+    ``legacy_original``), each named policy file, and fixed budgets, with and without
+    size-biased attention.
+
     Args:
         videos: folder of the videos under evaluation; never the calibration videos.
         out: the results folder.
-        policy, region: written by ``vitprune calibrate`` and ``vitprune region``.
+        policy, region: written by ``vitprune calibrate`` and ``vitprune region``. The mask
+            study needs the policy; the policy study may go without it.
         weights, model_source: the backbone checkpoint and the VideoMAE folder.
         evaluate: stems of the videos to evaluate; every video in ``videos`` when empty.
         device, precision, batch: how the backbone runs; ``precision`` is ``off`` (fp32,
@@ -44,11 +57,15 @@ class Benchmark:
             the top of the grid by this factor.
         show: clips per video kept for the figures, spread evenly over it.
         learnable_positions: the checkpoint carries a learned positional embedding.
+        policies: ``(name, file)`` of the policies to compare, legacy or quality-aware.
+        fixed: tokens of each fixed-budget variant, ``fixo_<tokens>``.
+        proportional: tokens of each fixed-budget variant with size-biased attention,
+            ``fixo_<tokens>_pa``.
     """
 
     videos: Path
     out: Path
-    policy: Path
+    policy: Path | None
     region: Path
     weights: Path
     model_source: Path
@@ -63,17 +80,51 @@ class Benchmark:
     fixed_weight: float = 0.15
     show: int = 6
     learnable_positions: bool = False
+    policies: tuple[tuple[str, Path], ...] = ()
+    fixed: tuple[int, ...] = ()
+    proportional: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("videos", "out", "policy", "region", "weights", "model_source"):
+        for name in ("videos", "out", "region", "weights", "model_source"):
             setattr(self, name, Path(getattr(self, name)))
+        self.policy = None if self.policy is None else Path(self.policy)
         self.evaluate = tuple(self.evaluate)
+        self.policies = tuple((str(name), Path(path)) for name, path in self.policies)
+        self.fixed, self.proportional = tuple(self.fixed), tuple(self.proportional)
+        names = [name for name, _ in self.policies]
+        for name in names:
+            fixed = name.startswith("fixo_")
+            if not re.fullmatch(r"[a-z0-9_]+", name) or name in RESERVED or fixed:
+                raise ValueError(f"a policy variant needs a name of a-z, 0-9 and _, not one of "
+                                 f"{RESERVED} nor fixo_*: got {name!r}")
+        if len(set(names)) != len(names):
+            raise ValueError(f"policy variant names must be unique, got {names}")
+        for levels in (self.fixed, self.proportional):
+            if len(set(levels)) != len(levels):
+                raise ValueError(f"fixed budgets must be unique, got {levels}")
+            for tokens in levels:
+                FixedBudget(tokens).validate_for(GEOMETRY)
+        if self.policy is None and not self.policy_study:
+            raise ValueError("the mask study needs --policy, written by 'vitprune calibrate'")
         if self.precision not in ("off", "fp16", "bf16"):
             raise ValueError("precision must be 'off', 'fp16' or 'bf16'")
         if self.batch < 1 or self.stride < 1 or self.frame_step < 1 or self.show < 1:
             raise ValueError("batch, stride, frame_step and show must be at least 1")
         validate_prune_layer(self.prune_layer, GEOMETRY.depth)
         top_rows_prior(GEOMETRY.grid_size, self.fixed_rows, self.fixed_weight)  # validates
+
+    @property
+    def policy_study(self) -> bool:
+        """Budgets compared without a mask, rather than masks under one policy."""
+        return bool(self.policies or self.fixed or self.proportional)
+
+    @property
+    def variants(self) -> tuple[str, ...]:
+        if not self.policy_study:
+            return VARIANTS
+        return ("denso", *(("legacy_original",) if self.policy is not None else ()),
+                *(name for name, _ in self.policies), *(f"fixo_{k}" for k in self.fixed),
+                *(f"fixo_{k}_pa" for k in self.proportional))
 
     @property
     def span(self) -> int:
@@ -158,6 +209,11 @@ class RunRecord:
     def stems(self) -> list[str]:
         """The evaluated videos."""
         return list(self.run["schedules"])
+
+    @property
+    def variants(self) -> list[str]:
+        """The variants the run compared; the dense one first."""
+        return self.settings.get("variants", list(VARIANTS))
 
     def video(self, stem: str) -> dict:
         """``fps``, ``frames`` and ``clips`` of an evaluated video."""

@@ -17,7 +17,7 @@ cv2 = pytest.importorskip("cv2")
 from vitprune.core.testing import reference_backbone, reference_geometry  # noqa: E402
 from vitprune.pipeline.benchmark import inference, settings  # noqa: E402
 from vitprune.pipeline.benchmark.settings import VARIANTS, Benchmark  # noqa: E402
-from vitprune.pipeline.provenance import MANIFEST_NAME  # noqa: E402
+from vitprune.pipeline.provenance import MANIFEST_NAME, SourceFile  # noqa: E402
 from vitprune.pipeline.region import write_region  # noqa: E402
 
 FPS, SECONDS = 8, 8
@@ -169,3 +169,86 @@ def test_a_policy_calibrated_for_another_cut_is_refused_before_the_model_loads(
 
     with pytest.raises(ValueError, match="prune_layer"):
         inference.run_benchmark(bench)
+
+
+def _quality_file(path, drivers=("1",)):
+    """A quality-aware policy file, calibrated on synthetic clips of ``drivers``."""
+    from vitprune.core.compressibility import CompressibilityFeatures
+    from vitprune.core.policy import calibrate_quality_aware
+
+    generator, count = torch.Generator().manual_seed(0), 12
+    features = CompressibilityFeatures(*(torch.rand(count, generator=generator) for _ in range(4)))
+    drift = torch.rand(count, 3, generator=generator, dtype=torch.float64) * 0.2
+    names = [f"c{i % 3}" for i in range(count)]
+    policy = calibrate_quality_aware(
+        features, drift, names, [drivers[i % len(drivers)] for i in range(count)],
+        (16, 32, 48, 64), bins=2, min_support=1, min_videos=1, probe_cells=(2, 2), probe_top=2,
+    )
+    videos = [{"stem": f"c{i}", "driver": driver, "split": "fit",
+               "source": {"sha256": str(i) * 64}} for i, driver in enumerate(drivers)]
+    path.write_text(json.dumps({"policy": policy.to_dict(), "calibration": {
+        "prune_layer": 2, "frame_step": 2, "precision": "off", "videos": videos}}), "utf-8")
+    return path
+
+
+def test_the_policy_study_runs_its_variants(bench, model, tmp_path):
+    from vitprune.core.policy import REASONS
+
+    bench.policies = (("qabp", _quality_file(tmp_path / "q.json")),)
+    bench.fixed, bench.proportional = (32,), (32,)
+    inference.run_benchmark(bench)
+
+    variants = ("denso", "legacy_original", "qabp", "fixo_32", "fixo_32_pa")
+    rows = _rows(bench)
+    assert len(rows) == len(bench.clip_starts(FPS * SECONDS)) * len(variants)
+    assert {r["variant"] for r in rows} == set(variants)
+    assert all(r["tokens"] == 32 for r in rows if r["variant"].startswith("fixo_32"))
+    assert all(r["inside_region"] is None for r in rows)  # no inspection pass in this study
+    for row in rows:
+        if row["variant"] == "qabp":
+            assert row["reason"] in REASONS and isinstance(row["predicted_risk"], float)
+        else:
+            assert row["reason"] is None and row["predicted_risk"] is None
+        if row["variant"] == "denso":
+            assert row["rel_l2_to_dense"] == pytest.approx(0.0, abs=1e-6)
+    record = json.loads(bench.record.read_text("utf-8"))
+    assert record["settings"]["variants"] == list(variants)
+    assert set(record["policies"]) == {"legacy_original", "qabp"}
+    assert record["probe_timing"]["probe_ms_per_clip"] > 0
+
+
+def test_the_variant_timed_first_changes_from_batch_to_batch(bench, model):
+    bench.policy, bench.fixed = None, (32, 48)
+    inference.run_benchmark(bench)
+
+    rows = _rows(bench)
+    firsts = [rows[i]["variant"] for i in range(0, len(rows), bench.batch * 3)]
+    assert firsts[:2] == ["denso", "fixo_32"]
+
+
+def test_a_quality_aware_policy_calibrated_on_an_evaluated_driver_is_refused(
+    bench, monkeypatch, tmp_path
+):
+    def never(bench):
+        raise AssertionError("the model must not load")
+
+    monkeypatch.setattr(inference, "load_model", never)
+    bench.policies = (("qabp", _quality_file(tmp_path / "q.json", drivers=("v",))),)
+
+    with pytest.raises(ValueError, match="evaluated"):
+        inference.run_benchmark(bench)
+
+
+def test_the_legacy_overlap_with_the_evaluated_videos_is_recorded(bench, model, tmp_path):
+    from dataclasses import asdict
+
+    content = json.loads(bench.policy.read_text("utf-8"))
+    content["calibration"]["videos"] = [{"source": asdict(SourceFile.of(bench.videos / "v.mp4"))}]
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps(content), encoding="utf-8")
+    bench.policies = (("legacy_recalibrada", legacy),)
+    inference.run_benchmark(bench)
+
+    overlap = json.loads(bench.record.read_text("utf-8"))["calibration_overlap"]
+    assert overlap["legacy_recalibrada"] == {"videos": ["v"], "drivers": ["v"]}
+    assert overlap["legacy_original"] == {"videos": [], "drivers": []}

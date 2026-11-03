@@ -12,7 +12,8 @@ result here. Usage::
 
 ``JOB`` is the JSON ``vitprune benchmark ama`` writes: the stride of the features, and per
 variant the folder of its features and where to write its ``predictions.csv``; per video
-the frame rate and the frame count.
+the frame rate and the frame count; and, when given, the annotations of those videos, which
+the AMA's own evaluator scores the detections against, writing each variant's ``map.json``.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ import numpy as np
 import torch
 
 COLUMNS = ["video-id", "t-start", "t-end", "label", "score"]
+#: The tIoUs the AMA's evaluator averages over, as in its own evaluation.
+TIOUS = [0.1, 0.2, 0.3, 0.4, 0.5]
 #: The line the parent looks for, to record which interpreter the AMA ran under.
 ENVIRONMENT = "ama-environment: "
 
@@ -84,6 +87,23 @@ def detect(model, cfg: dict, stride: int, stem: str, video: dict, feats: np.ndar
     ]
 
 
+def score(labels: str, rows: list, destination: Path) -> None:
+    """The AMA's mAP per tIoU against the annotations, and its average; zero without any
+    detection, which the evaluator does not take."""
+    if rows:
+        import pandas as pd
+        from libs.utils import ANETdetection
+
+        evaluator = ANETdetection(labels, split="validation", tiou_thresholds=np.array(TIOUS))
+        found, average, _ = evaluator.evaluate(pd.DataFrame(rows, columns=COLUMNS),
+                                               str(destination / "evaluated.csv"), verbose=False)
+        found, average = [float(value) for value in found], float(average)
+    else:
+        found, average = [0.0] * len(TIOUS), 0.0
+    (destination / "map.json").write_text(
+        json.dumps({"tiou": TIOUS, "map": found, "average": average}), encoding="utf-8")
+
+
 def main(argv: list[str]) -> int:
     config, weights, job_path = argv
     job = json.loads(Path(job_path).read_text(encoding="utf-8"))
@@ -108,6 +128,8 @@ def main(argv: list[str]) -> int:
             writer.writerow(COLUMNS)
             writer.writerows(rows)
         print(f"[{name}] {len(rows)} detections", flush=True)
+        if job.get("labels"):
+            score(job["labels"], rows, destination)
     return 0
 
 

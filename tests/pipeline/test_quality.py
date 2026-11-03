@@ -345,3 +345,18 @@ def test_calibrate_quality_writes_the_policy_and_prints_the_verdict(tmp_path, ca
     assert main(arguments) == 0
     assert "G3: " in capsys.readouterr().out
     assert main(arguments) == 2  # the policy written is never replaced
+
+
+def test_budget_curve_can_measure_with_proportional_attention(model, videos, tmp_path):
+    def curve(out, *extra):
+        arguments = [*model, "--videos", str(videos / "a.mp4"), "--levels", "16", "64",
+                     "--prune-layer", "1", "--clips-per-video", "2", "--out", str(out), *extra]
+        assert main(["budget-curve", *arguments]) == 0
+        return read_records(out)
+
+    settings, _, proportional = curve(tmp_path / "pa", "--size-biased-attention")
+    _, _, plain = curve(tmp_path / "plain")
+
+    assert settings["size_biased_attention"] is True
+    assert proportional[0]["levels"]["16"]["d_cos"] != pytest.approx(
+        plain[0]["levels"]["16"]["d_cos"])

@@ -1,4 +1,10 @@
-"""Run the benchmark: every clip of the evaluated videos through the four variants.
+"""Run the benchmark: every clip of the evaluated videos through every variant.
+
+The mask study runs the dense VideoMAE and three ViT-Prune variants under one policy. The
+policy study runs the dense VideoMAE and budgets without a mask -- policy files, fixed
+budgets and fixed budgets with size-biased attention -- turning the order in which they are
+timed from batch to batch, so that none is always timed first. A quality-aware policy
+calibrated on an evaluated video or driver is refused; a legacy one is only reported.
 
 The policy and the region come from the command line, calibrated on videos that are not
 evaluated here::
@@ -12,8 +18,9 @@ Writes, under the results folder:
   and ``a_prob`` (the fine-tuned head's class probabilities), with a manifest per
   variant;
 * ``clips.jsonl`` -- one line per clip and variant: the tokens kept, the budget regime,
-  the share of the kept tokens inside the driver region, the cosine to the dense
-  embedding and the seconds taken;
+  the share of the kept tokens inside the driver region (mask study), the cosine and the
+  relative L2 distance to the dense embedding, the risk a quality-aware policy predicted
+  and why it chose, and the seconds taken;
 * ``selection/`` -- the tokens each variant kept in the ``--show`` clips spread over each
   video, for the figures;
 * ``frames/`` -- the middle frame of those clips;
@@ -34,12 +41,15 @@ import torch
 import torch.nn.functional as F
 
 from vitprune.bench.latency import autocast
-from vitprune.core import PrunedEncoder, PruningPlan, check_backbone
+from vitprune.bench.quality import time_probe
+from vitprune.core import FixedBudget, PrunedEncoder, PruningPlan, check_backbone
+from vitprune.core.policy import QualityAwareBudgetPolicy
 from vitprune.core.priors import top_rows_prior
-from vitprune.pipeline.benchmark.settings import GEOMETRY, VARIANTS, Benchmark
+from vitprune.pipeline.benchmark.settings import GEOMETRY, Benchmark
 from vitprune.pipeline.calibration import read_policy
 from vitprune.pipeline.checkpoint import disable_activation_checkpointing, load_videomae
 from vitprune.pipeline.provenance import Manifest, SourceFile, describe_environment
+from vitprune.pipeline.quality import driver_of
 from vitprune.pipeline.region import read_region
 from vitprune.pipeline.video import _opencv, _spread, iter_clips
 
@@ -92,15 +102,26 @@ def save_frames(bench: Benchmark, video: Path, clips: list[dict]) -> None:
     capture.release()
 
 
-def encoders(bench: Benchmark, model, policy, region) -> dict[str, PrunedEncoder]:
-    fixed = top_rows_prior(GEOMETRY.grid_size, bench.fixed_rows, bench.fixed_weight)
-    priors = {"vitprune": None, "vitprune_mascara_fixa": fixed,
-              "vitprune_mascara_inteligente": region}
-    plans = {"denso": PruningPlan.dense()} | {
-        name: PruningPlan(prune_layer=bench.prune_layer, budget=policy, spatial_prior=prior)
-        for name, prior in priors.items()
-    }
-    return {name: PrunedEncoder(model, GEOMETRY, plans[name]) for name in VARIANTS}
+def encoders(bench: Benchmark, model, policies: dict, region) -> dict[str, PrunedEncoder]:
+    """One encoder per variant, the dense one first. ``policies`` maps a variant's name to
+    its budget; the mask study's policy is ``legacy_original``."""
+    layer, plans = bench.prune_layer, {"denso": PruningPlan.dense()}
+    if bench.policy_study:
+        plans |= {name: PruningPlan(prune_layer=layer, budget=budget)
+                  for name, budget in policies.items()}
+        plans |= {f"fixo_{k}": PruningPlan(prune_layer=layer, budget=FixedBudget(k))
+                  for k in bench.fixed}
+        plans |= {f"fixo_{k}_pa": PruningPlan(prune_layer=layer, budget=FixedBudget(k),
+                                              size_biased_attention=True)
+                  for k in bench.proportional}
+    else:
+        fixed = top_rows_prior(GEOMETRY.grid_size, bench.fixed_rows, bench.fixed_weight)
+        priors = {"vitprune": None, "vitprune_mascara_fixa": fixed,
+                  "vitprune_mascara_inteligente": region}
+        plans |= {name: PruningPlan(prune_layer=layer, budget=policies["legacy_original"],
+                                    spatial_prior=prior)
+                  for name, prior in priors.items()}
+    return {name: PrunedEncoder(model, GEOMETRY, plans[name]) for name in bench.variants}
 
 
 def inside_share(kept: torch.Tensor, region: torch.Tensor) -> list[float]:
@@ -116,27 +137,34 @@ def inside_share(kept: torch.Tensor, region: torch.Tensor) -> list[float]:
 
 @torch.inference_mode()
 def evaluate_batch(bench: Benchmark, model, clips: list[dict], tensor: torch.Tensor,
-                   runners: dict[str, PrunedEncoder], region: torch.Tensor):
+                   runners: dict[str, PrunedEncoder], region: torch.Tensor, turn: int = 0):
     """Every variant on a batch of clips: the rows, and per variant the embeddings and
-    class probabilities."""
+    class probabilities. In the policy study, the variant timed first is the ``turn``-th."""
     tensor = tensor.to(bench.device)
     shown = {i: {} for i, clip in enumerate(clips) if clip["show"]}
-    rows, outputs, dense = [], {}, None
-    for name, encoder in runners.items():
+    names = list(runners)
+    if bench.policy_study:
+        turn %= len(names)
+        names = names[turn:] + names[:turn]
+    count, found = len(clips), {}
+    for name in names:
+        encoder = runners[name]
         _sync(bench.device)
         started = time.perf_counter()
+        decision = None
         with autocast(bench.device, bench.precision):
             if encoder.plan.prunes:
                 embedding, budget = encoder.encode_with_budget(tensor)
                 tokens, regimes = budget.tokens.tolist(), budget.regimes.tolist()
+                decision = budget.decision
             else:
                 embedding = encoder.encode(tensor)
-                tokens, regimes = [GEOMETRY.num_tokens] * len(clips), [None] * len(clips)
+                tokens, regimes = [GEOMETRY.num_tokens] * count, [None] * count
             probabilities = model.head(embedding).float().softmax(dim=-1)
         _sync(bench.device)
-        seconds = (time.perf_counter() - started) / len(clips)
-        shares = [None] * len(clips)
-        if encoder.plan.prunes:
+        seconds = (time.perf_counter() - started) / count
+        shares = [None] * count
+        if encoder.plan.prunes and not bench.policy_study:
             # Outside the timing: the same decision again, to see where the tokens went.
             with autocast(bench.device, bench.precision):
                 selection = encoder.select(tensor)
@@ -147,15 +175,24 @@ def evaluate_batch(bench: Benchmark, model, clips: list[dict], tensor: torch.Ten
                 ])
                 if encoder.plan.spatial_prior is not None:
                     arrays[f"{name}_prior"] = encoder.plan.spatial_prior.cpu().numpy()
-        embedding = embedding.float()
-        dense = embedding if dense is None else dense
+        found[name] = (embedding.float(), probabilities, tokens, regimes, decision, shares,
+                       seconds)
+
+    dense = found["denso"][0]
+    rows, outputs = [], {}
+    for name in names:
+        embedding, probabilities, tokens, regimes, decision, shares, seconds = found[name]
         cosines = F.cosine_similarity(embedding, dense, dim=-1).tolist()
+        relative = ((embedding - dense).norm(dim=-1) / dense.norm(dim=-1)).tolist()
+        risks = [None] * count if decision is None else decision.predicted_risk.tolist()
+        reasons = [None] * count if decision is None else list(decision.reasons)
         outputs[name] = (embedding.cpu().numpy(), probabilities.cpu().numpy())
         rows += [{
             "video": clip["video"], "start_frame": clip["start"],
             "start_s": round(clip["start"] / clip["fps"], 3),
             "variant": name, "tokens": int(tokens[i]), "regime": regimes[i],
             "inside_region": shares[i], "cosine_to_dense": cosines[i],
+            "rel_l2_to_dense": relative[i], "predicted_risk": risks[i], "reason": reasons[i],
             "seconds": round(seconds, 4),
         } for i, clip in enumerate(clips)]
     for i, arrays in shown.items():
@@ -191,11 +228,12 @@ def run_video(bench: Benchmark, model, video: Path, clips: list[dict],
               runners: dict[str, PrunedEncoder], region: torch.Tensor):
     by_start = {c["start"]: c for c in clips}
     rows, outputs = [], {name: ([], []) for name in runners}
-    batch, tensors, started = [], [], time.time()
+    batch, tensors, started, turns = [], [], time.time(), [0]
 
     def flush() -> None:
         found, produced = evaluate_batch(bench, model, batch, torch.stack(tensors), runners,
-                                         region)
+                                         region, turns[0])
+        turns[0] += 1
         rows.extend(found)
         for name, (embedding, probability) in produced.items():
             outputs[name][0].append(embedding)
@@ -215,10 +253,11 @@ def run_video(bench: Benchmark, model, video: Path, clips: list[dict],
     return rows, outputs
 
 
-def write_manifests(bench: Benchmark, videos: list[Path], policy, runners: dict) -> None:
+def write_manifests(bench: Benchmark, videos: list[Path], runners: dict) -> None:
     """The record ``vitprune evaluate`` and the AMA step read next to the features."""
     rows = [json.loads(line) for line in bench.clips.read_text(encoding="utf-8").splitlines()]
-    for name in runners:
+    for name, encoder in runners.items():
+        plan = encoder.plan
         outputs = {}
         for video in videos:
             mine = sorted((r for r in rows if r["video"] == video.stem and r["variant"] == name),
@@ -230,8 +269,9 @@ def write_manifests(bench: Benchmark, videos: list[Path], policy, runners: dict)
             }
         Manifest(
             settings={"variant": name, "stride": bench.stride, "frame_step": bench.frame_step,
-                      "prune_layer": 0 if name == "denso" else bench.prune_layer,
-                      "policy": None if name == "denso" else policy.version,
+                      "prune_layer": plan.prune_layer if plan.prunes else 0,
+                      "policy": plan.budget.version if plan.prunes else None,
+                      "size_biased_attention": plan.size_biased_attention,
                       "precision": bench.precision, "device": bench.device,
                       "geometry": asdict(GEOMETRY),
                       "fixed_mask": bench.fixed_mask if name == "vitprune_mascara_fixa" else None,
@@ -241,44 +281,79 @@ def write_manifests(bench: Benchmark, videos: list[Path], policy, runners: dict)
         ).write(bench.features / name)
 
 
-def refuse_other_runs(record_path: Path, settings: dict, policy: Path, region: Path) -> None:
+def refuse_other_runs(record_path: Path, settings: dict, policy: Path | None,
+                      region: Path) -> None:
     """Stop when the results folder holds a run of another policy, region or settings:
     resuming next to it would mix two experiments."""
     if not record_path.exists():
         return
     before = json.loads(record_path.read_text(encoding="utf-8"))
+    policy = None if policy is None else SourceFile.of(policy).sha256
     if (before.get("settings") != settings
-            or before.get("policy", {}).get("sha256") != SourceFile.of(policy).sha256
+            or (before.get("policy") or {}).get("sha256") != policy
             or before.get("region", {}).get("sha256") != SourceFile.of(region).sha256):
         raise ValueError(f"{record_path.parent} holds results of another configuration; "
                          "move them out or choose another --out")
 
 
+def calibration_overlap(path: Path, evaluated: dict[str, str]) -> dict:
+    """The evaluated videos (``stem -> sha256``) and drivers a policy file was calibrated on."""
+    calibration = json.loads(Path(path).read_text(encoding="utf-8")).get("calibration", {})
+    hashes, drivers = set(), set()
+    for entry in calibration.get("videos", []):
+        source = entry.get("source") or {}
+        hashes.add(source.get("sha256"))
+        drivers.add(entry.get("driver") or driver_of(entry.get("stem")
+                                                     or Path(source.get("path", "")).stem))
+    return {"videos": sorted(stem for stem, sha in evaluated.items() if sha in hashes),
+            "drivers": sorted({driver_of(stem) for stem in evaluated} & drivers)}
+
+
 def run_benchmark(bench: Benchmark) -> None:
     """Run the variants over the evaluated videos, resuming a run of the same configuration."""
     bench.out.mkdir(parents=True, exist_ok=True)
-    policy = read_policy(bench.policy, bench.prune_layer, bench.frame_step, bench.weights)
+    files = ({"legacy_original": bench.policy} if bench.policy is not None else {}) | dict(
+        bench.policies)
+    policies = {name: read_policy(path, bench.prune_layer, bench.frame_step, bench.weights,
+                                  bench.precision) for name, path in files.items()}
     region = read_region(bench.region, GEOMETRY)
     videos = bench.evaluated()
+    overlap = {}
+    if bench.policy_study:
+        evaluated = {video.stem: SourceFile.of(video).sha256 for video in videos}
+        overlap = {name: calibration_overlap(path, evaluated) for name, path in files.items()}
+        tainted = {name: found for name, found in overlap.items()
+                   if isinstance(policies[name], QualityAwareBudgetPolicy)
+                   and (found["videos"] or found["drivers"])}
+        if tainted:
+            raise ValueError(f"quality-aware policies calibrated on an evaluated video or "
+                             f"driver: {tainted}; calibrate them on other drivers")
+        for name, found in overlap.items():
+            if found["videos"] or found["drivers"]:
+                print(f"warning: {name} was calibrated on evaluated videos {found['videos']} "
+                      f"or drivers {found['drivers']}", flush=True)
     infos = {video.stem: video_info(video) for video in videos}
     schedules = {video.stem: plan(bench, video, infos[video.stem]) for video in videos}
     for video in videos:
         save_frames(bench, video, schedules[video.stem])
     settings = {"stride": bench.stride, "frame_step": bench.frame_step,
                 "prune_layer": bench.prune_layer, "fixed_mask": bench.fixed_mask,
-                "variants": list(VARIANTS), "device": bench.device, "batch": bench.batch,
+                "variants": list(bench.variants), "device": bench.device, "batch": bench.batch,
                 "precision": bench.precision, "evaluate": [video.stem for video in videos],
                 "show": bench.show, "learnable_positions": bench.learnable_positions}
+    if bench.policy_study:
+        settings |= {"policies": {name: SourceFile.of(path).sha256 for name, path in files.items()},
+                     "fixed": list(bench.fixed), "proportional": list(bench.proportional)}
     refuse_other_runs(bench.record, settings, bench.policy, bench.region)
     model = load_model(bench)
     if not bench.record.exists():
         report = check_backbone(model, GEOMETRY, reference=model.forward_features)
         print(report.describe(), flush=True)
-        bench.record.write_text(json.dumps({
+        record = {
             "check": report.describe(),
             "weights": asdict(SourceFile.of(bench.weights)),
             "model_source": str(bench.model_source),
-            "policy": asdict(SourceFile.of(bench.policy)),
+            "policy": None if bench.policy is None else asdict(SourceFile.of(bench.policy)),
             "region": asdict(SourceFile.of(bench.region)),
             "videos": str(bench.videos),
             "environment": describe_environment(),
@@ -286,11 +361,25 @@ def run_benchmark(bench: Benchmark) -> None:
             "settings": settings,
             "schedules": {stem: {**infos[stem], "clips": len(clips)}
                           for stem, clips in schedules.items()},
-        }, indent=2), encoding="utf-8")
+        }
+        if bench.policy_study:
+            record["policies"] = {name: asdict(SourceFile.of(path)) for name, path in files.items()}
+            record["calibration_overlap"] = overlap
+            probed = [p for p in policies.values()
+                      if isinstance(p, QualityAwareBudgetPolicy) and p.uses_probe]
+            if probed:
+                record["probe_timing"] = time_probe(GEOMETRY, bench.batch, bench.device,
+                                                    cells=probed[0].probe_cells,
+                                                    top=probed[0].probe_top)
+        bench.record.write_text(json.dumps(record, indent=2), encoding="utf-8")
 
-    print(f"policy {policy.version}, levels {list(policy.levels)}; region "
-          f"{float(region.mean()):.0%} of the frame", flush=True)
-    runners = encoders(bench, model, policy, region)
+    if bench.policy_study:
+        print(f"variants {list(bench.variants)}", flush=True)
+    else:
+        policy = policies["legacy_original"]
+        print(f"policy {policy.version}, levels {list(policy.levels)}; region "
+              f"{float(region.mean()):.0%} of the frame", flush=True)
+    runners = encoders(bench, model, {name: policies[name] for name in files}, region)
     run(bench, model, videos, schedules, runners, region)
-    write_manifests(bench, videos, policy, runners)
+    write_manifests(bench, videos, runners)
     print("done", flush=True)

@@ -32,9 +32,25 @@ FILES = {
             cfg.setdefault("model", {})
             return cfg
     """,
+    # The evaluator reports, per tIoU, a tenth of the detections it was given plus a
+    # hundredth of the annotated videos of the split: enough to see what reached it.
     "libs/utils/__init__.py": """
+        import json
+
+        import numpy as np
+
         def fix_random_seed(seed, include_cuda=True):
             pass
+
+        class ANETdetection:
+            def __init__(self, ant_file, split=None, tiou_thresholds=np.linspace(0.1, 0.5, 5)):
+                database = json.load(open(ant_file))["database"]
+                self.videos = [k for k, v in database.items() if v["subset"] == split]
+                self.tiou_thresholds = tiou_thresholds
+
+            def evaluate(self, preds, output_csv, verbose=True):
+                found = np.full(len(self.tiou_thresholds), len(preds) / 10 + len(self.videos) / 100)
+                return found, found.mean(), self.tiou_thresholds
     """,
     # One segment per video that reports what the model was given: the number of feature
     # steps, the duration, and the stride as the label.
@@ -180,16 +196,17 @@ def test_the_ama_step_takes_everything_from_its_flags(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         ama, "run_ama",
-        lambda out, project, config, weights, python=None: seen.update(
-            out=out, project=project, config=config, weights=weights, python=python),
+        lambda out, project, config, weights, python=None, labels=None: seen.update(
+            out=out, project=project, config=config, weights=weights, python=python,
+            labels=labels),
     )
     command = ["benchmark", "ama", "--out", "o", "--ama-project", "p", "--ama-config", "c.yaml",
-               "--ama-weights", "a.pth", "--ama-python", "/x/python"]
+               "--ama-weights", "a.pth", "--ama-python", "/x/python", "--labels", "l.json"]
 
     assert main(command) == 0
 
     assert seen == {"out": "o", "project": "p", "config": "c.yaml", "weights": "a.pth",
-                    "python": "/x/python"}
+                    "python": "/x/python", "labels": "l.json"}
 
 
 def test_the_manifest_records_the_features_and_the_interpreter_the_ama_ran_under(fake_ama):
@@ -221,3 +238,42 @@ def test_a_video_at_the_fps_the_ama_reads_time_at_gets_no_warning(fake_ama):
     run_ama(**fake_ama.args, progress=lines.append)
 
     assert not [line for line in lines if line.startswith("warning:")]
+
+
+def _labels(path, stems=("v", "w")):
+    database = {stem: {"subset": "training", "duration": 8.0, "annotations": [
+        {"label_id": 3, "label": "x", "segment": [1.0, 2.0]}]} for stem in stems}
+    path.write_text(json.dumps({"version": "1", "database": database}), encoding="utf-8")
+    return path
+
+
+def test_with_labels_the_ama_writes_the_map_of_each_variant(fake_ama, tmp_path):
+    run_ama(**fake_ama.args, labels=_labels(tmp_path / "labels.json"))
+
+    for variant in VARIANTS:
+        found = json.loads((fake_ama.out / "ama" / variant / "map.json").read_text("utf-8"))
+        assert found["tiou"] == pytest.approx([0.1, 0.2, 0.3, 0.4, 0.5])
+        assert found["average"] == pytest.approx(0.11)  # one detection, one annotated video
+
+
+def test_the_labels_keep_only_the_evaluated_videos(fake_ama, tmp_path):
+    run_ama(**fake_ama.args, labels=_labels(tmp_path / "labels.json"))
+
+    kept = json.loads((fake_ama.out / "ama" / "labels.json").read_text("utf-8"))["database"]
+    assert set(kept) == {"v"} and kept["v"]["subset"] == "validation"
+
+
+def test_a_variant_without_detections_has_a_map_of_zero(fake_ama, tmp_path):
+    fake_ama.set_model_option(empty=True)
+
+    run_ama(**fake_ama.args, labels=_labels(tmp_path / "labels.json"))
+
+    found = json.loads((fake_ama.out / "ama" / "denso" / "map.json").read_text("utf-8"))
+    assert found["map"] == [0.0] * 5 and found["average"] == 0.0
+
+
+def test_an_evaluated_video_without_annotation_is_refused(fake_ama, tmp_path):
+    with pytest.raises(ValueError, match="annotation"):
+        run_ama(**fake_ama.args, labels=_labels(tmp_path / "labels.json", stems=("w",)))
+
+    assert not (fake_ama.out / "ama" / "job.json").exists()

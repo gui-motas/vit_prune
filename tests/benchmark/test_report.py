@@ -224,3 +224,95 @@ def test_the_dense_row_says_it_is_the_reference():
     assert report.NAMES["denso"] == DENSE
     assert report.short_label("denso") == "Denso (referência)"
     assert report.short_label("vitprune") == "Sem máscara"
+
+
+# ---------------------------------------------------------------------------
+# Against the annotations, and the policy study
+# ---------------------------------------------------------------------------
+def test_boundary_errors_measure_the_matched_actions_only():
+    actions = _d([["v", 0.0, 10.0, 1, 1.0], ["v", 20.0, 30.0, 2, 1.0]])
+    found = _d([["v", 1.0, 9.0, 1, 0.9]])
+    assert report.boundary_errors(actions, found) == {"matched": 1, "start": 1.0, "end": 1.0}
+    assert report.boundary_errors(actions, _d([]))["matched"] == 0
+
+
+def test_false_positives_are_detections_matching_no_action():
+    actions = _d([["v", 0.0, 10.0, 1, 1.0]])
+    found = _d([["v", 1.0, 9.0, 1, 0.9], ["v", 40.0, 50.0, 1, 0.8], ["v", 0.0, 10.0, 2, 0.2]])
+    assert report.false_positives(actions, found) == 1  # the last is below the minimum score
+
+
+def test_clip_accuracy_reads_the_action_holding_each_clip_centre():
+    probabilities = np.array([[.8, .1, .1], [.1, .8, .1], [.1, .1, .8], [.8, .1, .1]])
+    actions = _d([["v", 2.0, 6.0, 1, 1.0]])
+    assert report.clip_accuracy(probabilities, np.array([1.0, 3.0, 5.0, 7.0]), actions) == (1, 2)
+
+
+def _policy_run(tmp_path):
+    """A finished policy study of 4 clips of one video, with the AMA and the annotations:
+    the fixed budget finds one of the two annotated actions, the dense one both."""
+    out = tmp_path / "run"
+    variants = ("denso", "fixo_32", "fixo_32_pa")
+    seconds = {"denso": 1.0, "fixo_32": 0.4, "fixo_32_pa": 0.5}
+    rows = []
+    for variant in variants:
+        (out / "features" / variant).mkdir(parents=True)
+        for start in (0, 16, 32, 48):
+            rows.append({"video": "v", "start_frame": start, "start_s": start / 8,
+                         "variant": variant, "tokens": 64 if variant == "denso" else 32,
+                         "regime": None, "inside_region": None,
+                         "cosine_to_dense": 1.0 if variant == "denso" else 0.8,
+                         "rel_l2_to_dense": 0.0 if variant == "denso" else 0.5,
+                         "predicted_risk": None, "reason": None, "seconds": seconds[variant]})
+        np.savez(out / "features" / variant / "v.npz", a_prob=np.eye(3)[[0, 1, 1, 2]] * 0.8 + 0.1,
+                 feats=np.zeros((4, 6)))
+        (out / "ama" / variant).mkdir(parents=True)
+        found = [["v", 0.0, 10.0, 1, .9]] + ([["v", 4.0, 8.0, 2, .8]] if variant == "denso" else [])
+        _d(found).to_csv(out / "ama" / variant / "predictions.csv", index=False)
+        average = 0.6 if variant == "denso" else 0.3
+        (out / "ama" / variant / "map.json").write_text(json.dumps(
+            {"tiou": [0.1, 0.2, 0.3, 0.4, 0.5], "map": [average] * 5, "average": average}))
+    (out / "clips.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    (out / "ama" / "labels.json").write_text(json.dumps({"database": {"v": {
+        "subset": "validation", "annotations": [
+            {"label_id": 1, "label": "a", "segment": [0.0, 10.0]},
+            {"label_id": 2, "label": "b", "segment": [4.0, 8.0]}]}}}), encoding="utf-8")
+    grid = report.GRID
+    (out / "region.json").write_text(json.dumps({
+        "region": {"grid_size": grid, "prior": [1.0] * (grid * grid)},
+        "calibration": {"area": 1.0, "detected": 1, "clips": 1, "videos": [{}]}}), "utf-8")
+    (out / "run.json").write_text(json.dumps({
+        "check": "dense path matches", "weights": {"path": "/x/w.pth", "sha256": "abc"},
+        "model_source": "/x/src", "policy": None, "policies": {},
+        "region": {"path": str(out / "region.json")},
+        "environment": {"python": "3.10", "torch": "2.x", "gpu": "Orin"},
+        "settings": {"device": "cuda", "precision": "off", "batch": 8, "prune_layer": 2,
+                     "stride": 16, "frame_step": 2, "fixed_mask": {"rows": 4, "weight": 0.15},
+                     "variants": list(variants)},
+        "schedules": {"v": {"fps": 8.0, "frames": 64, "clips": 4}},
+    }), encoding="utf-8")
+    return out
+
+
+def test_the_policy_study_report_separates_fidelity_agreement_and_annotations(tmp_path):
+    pytest.importorskip("openpyxl")
+    out = _policy_run(tmp_path)
+
+    book = pd.ExcelFile(report.make_report(out))
+
+    assert "Por ação anotada" in book.sheet_names
+    summary = book.parse("Resumo").set_index("Variante")
+    dense, fixed, proportional = (report.variant_name(v) for v in ("denso", "fixo_32",
+                                                                    "fixo_32_pa"))
+    assert summary.loc[dense, "mAP médio"] == pytest.approx(0.6)
+    assert summary.loc[fixed, "mAP médio"] == pytest.approx(0.3)
+    assert summary.loc[dense, report.GT_RECALL] == 1.0
+    assert summary.loc[fixed, report.GT_RECALL] == 0.5
+    assert summary.loc[fixed, "Cosseno P10 com o denso"] == pytest.approx(0.8)
+    assert summary.loc[proportional, report.PA_COST] == pytest.approx(0.25)
+    assert pd.isna(summary.loc[fixed, report.PA_COST])
+    actions = book.parse("Por ação anotada")
+    assert actions["Classe"].tolist() == ["classe 1", "classe 2"]
+    figures = out / "figuras"
+    assert (figures / "qualidade-custo.png").exists()
+    assert not list(figures.glob("mascaras-*.png"))

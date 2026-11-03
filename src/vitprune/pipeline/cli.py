@@ -387,7 +387,8 @@ def _run_budget_curve(args) -> int:
     from vitprune.pipeline.quality import SUMMARY, collect_records
 
     geometry = ClipGeometry.videomae_giant()
-    plan = PruningPlan(prune_layer=args.prune_layer, motion_weight=args.motion_weight)
+    plan = PruningPlan(prune_layer=args.prune_layer, motion_weight=args.motion_weight,
+                       size_biased_attention=args.size_biased_attention)
     backbone = _load_backbone(args)
 
     print(RULE)
@@ -506,6 +507,12 @@ def _run_benchmark_run(args) -> int:
     from vitprune.pipeline.benchmark.inference import run_benchmark
     from vitprune.pipeline.benchmark.settings import Benchmark
 
+    policies = []
+    for item in args.policies or ():
+        name, _, path = item.partition("=")
+        if not name or not path:
+            raise ValueError(f"--policies takes NAME=PATH, got {item!r}")
+        policies.append((name, path))
     bench = Benchmark(
         videos=args.videos,
         out=args.out,
@@ -524,10 +531,16 @@ def _run_benchmark_run(args) -> int:
         fixed_weight=args.fixed_weight,
         show=args.show,
         learnable_positions=args.learnable_positions,
+        policies=tuple(policies),
+        fixed=tuple(args.fixed or ()),
+        proportional=tuple(args.proportional or ()),
     )
 
     print(RULE)
-    print("the dense backbone and three ViT-Prune variants, on every clip")
+    if bench.policy_study:
+        print(f"the dense backbone and {len(bench.variants) - 1} budgets, no mask, on every clip")
+    else:
+        print("the dense backbone and three ViT-Prune variants, on every clip")
     print("evaluated videos must not be among the calibration videos")
     print(RULE)
     run_benchmark(bench)
@@ -540,7 +553,8 @@ def _run_benchmark_ama(args) -> int:
     print(RULE)
     print("the AMA on the features of each variant, no weight altered")
     print(RULE)
-    run_ama(args.out, args.ama_project, args.ama_config, args.ama_weights, args.ama_python)
+    run_ama(args.out, args.ama_project, args.ama_config, args.ama_weights, args.ama_python,
+            labels=args.labels)
     return 0
 
 
@@ -755,6 +769,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     curve.add_argument("--prune-layer", type=int, default=2)
     curve.add_argument("--motion-weight", type=float, default=0.5)
+    curve.add_argument(
+        "--size-biased-attention", action="store_true",
+        help="merged tokens weigh in attention by their size (experimental)",
+    )
     curve.set_defaults(handler=_run_budget_curve)
 
     quality = commands.add_parser(
@@ -894,7 +912,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--evaluate", nargs="+", metavar="STEM",
         help="names of the videos to evaluate, without extension (default: every video)",
     )
-    bench_run.add_argument("--policy", required=True, help="written by 'vitprune calibrate'")
+    bench_run.add_argument(
+        "--policy",
+        help="written by 'vitprune calibrate'; the mask study needs it, the policy study runs "
+             "it as legacy_original",
+    )
+    bench_run.add_argument(
+        "--policies", nargs="+", metavar="NAME=PATH",
+        help="policy study: policy files to compare, legacy or quality-aware, as variants NAME",
+    )
+    bench_run.add_argument(
+        "--fixed", nargs="+", type=int, metavar="TOKENS",
+        help="policy study: fixed budgets to compare, as variants fixo_TOKENS",
+    )
+    bench_run.add_argument(
+        "--proportional", nargs="+", type=int, metavar="TOKENS",
+        help="policy study: fixed budgets with size-biased attention, as variants fixo_TOKENS_pa",
+    )
     bench_run.add_argument("--region", required=True, help="written by 'vitprune region'")
     _add_model_arguments(bench_run)
     bench_run.add_argument(
@@ -938,6 +972,11 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_ama.add_argument(
         "--ama-python",
         help="interpreter of the AMA's environment, if not the one running vitprune",
+    )
+    bench_ama.add_argument(
+        "--labels",
+        help="annotations of the evaluated videos (ActivityNet JSON, as the AMA's); with them, "
+             "the AMA's mAP per tIoU against them, per variant",
     )
     bench_ama.set_defaults(handler=_run_benchmark_ama)
 
