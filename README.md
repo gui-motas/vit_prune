@@ -121,6 +121,8 @@ vitprune cost      --tokens 256 512 768             # analytic estimate, no GPU 
 vitprune check     --weights w.pth --model-source /path --device cpu
 vitprune calibrate --videos calibration/ --weights w.pth --model-source /path --out policy.json
 vitprune region    --videos calibration/ --detector yolo26s.pt --out region.json
+vitprune budget-curve      --videos calibration/ --weights w.pth --model-source /path --out records/
+vitprune calibrate-quality --records records/ --holdout VIDEO_A VIDEO_B --out quality_policy.json
 vitprune latency   --videos data/ --weights w.pth --model-source /path --policy policy.json
 vitprune drift     --videos data/ --weights w.pth --model-source /path --policy policy.json
 vitprune run       --video clip.mp4 --weights w.pth --model-source /path --policy policy.json
@@ -134,6 +136,13 @@ vitprune benchmark report --out outputs/benchmark
 `benchmark` needs no annotation: it runs the dense backbone and three ViT-Prune variants,
 then the AMA on each, and the report compares every variant with the dense run, which is
 the reference. That measures how much pruning changes the result, not whether it is right.
+`benchmark run --policies/--fixed/--proportional` compares budgets instead of masks, and
+`benchmark ama --labels` adds the AMA's mAP against annotations when there are any.
+
+`budget-curve` measures how far each budget moves each clip's embedding from the dense
+one, and `calibrate-quality` fits on those records a quality-aware budget, which keeps the
+fewest tokens whose calibrated risk is within a tolerance and otherwise takes the dense
+path; it validates it on other drivers. See [`docs/operations.md`](docs/operations.md).
 
 `cost` needs the base dependencies, but no GPU, weights or video. Model commands
 automatically check dense equivalence before running. Without `--policy`, `run` and

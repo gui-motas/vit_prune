@@ -12,13 +12,17 @@ vitprune cost --policy policy.json --save results/cost.json
 vitprune check --weights w.pth --model-source /path/to/videomae
 vitprune calibrate --videos calibration/ --weights w.pth --model-source /path/to/videomae --levels 256 512 768 --out policy.json
 vitprune region --videos calibration/ --detector yolo26s.pt --out region.json
+vitprune budget-curve --videos calibration/ --weights w.pth --model-source /path/to/videomae --levels 512 1024 1536 2048 --clips-per-video 48 --precision off --out records/
+vitprune calibrate-quality --records records/ --holdout VIDEO_A VIDEO_B --tolerance 0.1 --out quality_policy.json
 vitprune latency --weights w.pth --model-source /path/to/videomae --policy policy.json --videos data/ --precision bf16 --save results/latency.json
 vitprune drift --videos data/ --weights w.pth --model-source /path/to/videomae --policy policy.json --clips 200 --save results/drift.json
 vitprune run --video clip.mp4 --weights w.pth --model-source /path/to/videomae --policy policy.json --out outputs/clip --compare
 vitprune extract --videos data/ --weights w.pth --model-source /path/to/videomae --policy policy.json --out features/adaptive --stride 16 --frame-step 2
 vitprune evaluate --features features/adaptive --downstream-project /path/to/localizer --downstream-config config.yaml --downstream-weights best.pth --frame-step 2 --out runs/adaptive
 vitprune benchmark run --videos eval/ --policy policy.json --region region.json --weights w.pth --model-source /path/to/videomae --out outputs/benchmark
+vitprune benchmark run --videos eval/ --region region.json --policies qabp=quality_policy.json --fixed 1536 1024 --proportional 1536 --weights w.pth --model-source /path/to/videomae --out outputs/policies
 vitprune benchmark ama --out outputs/benchmark --ama-project /path/to/AMA --ama-config config.yaml --ama-weights best.pth
+vitprune benchmark ama --out outputs/policies --ama-project /path/to/AMA --ama-config config.yaml --ama-weights best.pth --labels labels.json
 vitprune benchmark report --out outputs/benchmark
 ```
 
@@ -48,6 +52,34 @@ detector Ultralytics loads, such as
 `--policy` and excludes `--prior-top-rows`. A region file is never overwritten and is
 refused for a backbone with another grid.
 
+`budget-curve` measures, on clips spread over each video (`--clips-per-video`), how far
+each budget moves the final embedding from the dense one: the blocks up to the cut run
+once, then the remaining blocks once per level in `--levels`, the dense path always among
+them. Each clip's record holds its features at the cut (motion, redundancy and the probe of
+compressibility), and per level `1 - cos`, the relative L2 distance, the norms, whether a
+classification head gives the dense class, the merge's error per token and, after each
+block in `--depths`, the drift of the mean of the tokens. It is offline work, for
+calibration and diagnosis: inference never runs a clip twice. `--size-biased-attention`
+measures with proportional attention. The records folder resumes video by video and is
+refused under other settings. The driver of a video is the number after `user_id_` in its
+name, or the name itself.
+
+`calibrate-quality` fits the quality-aware budget on those records, without a GPU: the
+videos in `--holdout` are kept out of the fit, and no driver may be on both sides. The
+policy reads a clip's motion, redundancy and probe error at the cut, places it in one of
+`--bins` bins, and keeps the fewest tokens whose calibrated risk (the 90th percentile of
+`1 - cos` in that bin on the fit clips) is within `--tolerance`; otherwise, and whenever
+it cannot trust itself (a value outside the calibrated range, not finite, or a bin under
+`--min-support` clips or `--min-videos` videos), the dense path. `--no-probe` writes the
+same table without the probe, the ablation. The file holds the policy, its calibration
+(checkpoint, cut, sampling, precision, videos and drivers of each side) and its
+validation on the holdout, with the verdict of the registered criteria. The risk is an
+empirical estimate, not a guarantee.
+
+A quality-aware policy file goes wherever `--policy` goes. It is refused under another
+precision, cut, frame step or checkpoint, and with another selection than the one it was
+calibrated with: another `--motion-weight`, a spatial prior or `--size-biased-attention`.
+
 `benchmark` is the experiment in three steps, each reading what the one before wrote
 under `--out` (default `outputs/benchmark`). It needs no annotation: the dense pipeline is
 the reference, and each variant is compared with what the dense gave.
@@ -63,13 +95,23 @@ the reference, and each variant is compared with what the dense gave.
   per video, spread over it, for the figures. A video is written whole or redone, so an
   interrupted run resumes with the same command; a folder holding another policy, region
   or setting is refused.
+- `benchmark run --policies NAME=PATH ... --fixed TOKENS ... --proportional TOKENS ...`
+  runs the policy study instead: the dense backbone and budgets, none with a mask. Each
+  policy file, legacy or quality-aware, becomes the variant `NAME`; each fixed budget the
+  variant `fixo_TOKENS`, and with size-biased attention `fixo_TOKENS_pa`. `--policy`,
+  optional here, adds `legacy_original`. The order the variants are timed in turns batch
+  by batch. A quality-aware policy calibrated on an evaluated video or driver is refused;
+  a legacy one is only reported, in `run.json`.
 - `benchmark ama` runs the AMA temporal localizer, the pipeline's next stage, on each
   variant's features. It does not use the AMA's `eval.py`, which compares detections with
   annotations: the model runs from `ama_infer.py`, a script started in the AMA's folder
   under `--ama-python`, the interpreter of the AMA's environment (default: the one
   running vitprune; vitprune need not be installed in the other). A pure-Python
   `nms_1d_cpu` stands in for the AMA's compiled extension. The weights must match the
-  model exactly. A variant already run is refused, before anything starts.
+  model exactly. A variant already run is refused, before anything starts. With
+  `--labels`, annotations in the AMA's JSON layout covering every evaluated video, the
+  AMA's own evaluator also scores each variant against them: `map.json`, the mAP per tIoU
+  from 0.1 to 0.5 and its average.
 - `benchmark report` writes `benchmark-vitprune.xlsx` and the figures in `figuras/`. It
   works without `benchmark ama`, only without the detection columns. Per variant it gives
   the share of clips where the head's class is the dense one's; and, for the detections of
@@ -77,7 +119,11 @@ the reference, and each variant is compared with what the dense gave.
   class and a tIoU of `--tiou` or more (recall), the share of its own detections the
   dense run confirms (precision) and the mean best tIoU. These measure how much pruning
   changes the dense result, not whether that result is right: where the dense is wrong, a
-  variant that is wrong the same way agrees.
+  variant that is wrong the same way agrees. With the annotations, it also gives the mAP,
+  the annotated actions each variant finds and the share of its detections they confirm,
+  its false positives, the error of the boundaries it finds, and the head's class against
+  each annotated clip and action. The cosine and relative L2 distance to the dense
+  embedding, and the measured time per clip, sit beside them as auxiliary measures.
 
 `benchmark ama` and `benchmark report` take the evaluated videos and the sampling from
 the `run.json` the first step wrote.
@@ -94,6 +140,10 @@ No command here recognises actions directly: `evaluate` invokes the external mod
 
 - `calibrate`: the policy file, with the policy, its version and the calibration
   videos, clip count, cut, sampling and checkpoint identity.
+- `budget-curve`: under `--out`, `settings.json`, `sources.json` (each video's file,
+  driver and clip count), one `VIDEO.jsonl` per video and `summary.json`.
+- `calibrate-quality`: the policy file, never overwritten: `policy` (with
+  `policy_type: quality_aware_v1` and its version), `calibration` and `validation`.
 - `region`: the region file, with the grid, the region, its box and, per calibration
   video, how many clips found the driver and the crop, plus the detection rule and the
   detector weights.
