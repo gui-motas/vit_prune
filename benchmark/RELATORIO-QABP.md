@@ -133,3 +133,71 @@ variantes.
 - Afirmar que atenção proporcional ou um corte mais tardio resolvem o problema; isso não foi
   testado.
 - Dizer qualquer coisa sobre o AMA ou o mAP.
+
+## 2. Validação downstream reduzida — conjunto de seleção
+
+Depois do P0, o G2 passou a ser diagnóstico, e o critério principal passou a ser a tarefa:
+o AMA congelado reconhecendo e localizando ações contra as anotações, com custo real
+medido.
+
+- **Conjunto de seleção:** motoristas 28557 e 30932 (4 vídeos), separados do ajuste da QABP
+  (13522, 31903, 33682), do holdout (35418, 36305) e da avaliação final (38159, 38479).
+- **Condições:** as mesmas do P0 (FP32, batch 8, corte após o bloco 2, sem prior).
+- **Anotações:** `label_A1-train_A1-val.json`.
+- **Ressalva:** os 16 vídeos locais estão no subset de **treino** do AMA, e o AMA foi
+  treinado com recortes do motorista. O mAP mede o quanto cada variante preserva o
+  desempenho do pipeline, não a generalização.
+
+### 2.1 Atenção proporcional no painel do P0 (26 clipes; drift só como sinal auxiliar)
+
+`bash benchmark/run_qabp.sh atencao`: o mesmo painel e a mesma seleção, com
+`size_biased_attention`.
+
+| Tokens | Atenção | Cosseno P10 / P50 / P90 | Top-1 igual ao denso | Cosseno após o bloco 20 → 40 |
+|---:|---|---:|---:|---:|
+| 1024 | padrão | 0,281 / 0,522 / 0,828 | 42% | 0,859 → 0,550 |
+| 1024 | proporcional | 0,236 / 0,571 / 0,835 | 42% | 0,877 → 0,582 |
+| 1536 | padrão | 0,557 / 0,739 / 0,959 | 69% | 0,958 → 0,731 |
+| 1536 | proporcional | 0,548 / 0,779 / 0,967 | 65% | 0,964 → 0,768 |
+
+A atenção proporcional sobe a mediana do cosseno em 0,04–0,05, mas não melhora o P10 nem a
+concordância top-1, e o desvio continua nascendo depois do bloco 10. Pelo protocolo, isso
+não basta para adotá-la; ela passa pelo AMA na rodada de seleção.
+
+### 2.2 Conferência do denso (`28557_NoAudio_5`: 914 clipes, 16 ações anotadas)
+
+`bash benchmark/run_qabp.sh sanidade`. O critério era parar se o mAP médio do denso ficasse
+abaixo de 0,05; não ficou.
+
+| | Denso | Fixo 1536 |
+|---|---:|---:|
+| mAP@0,1 a @0,5 e médio | 1,00 | 1,00 |
+| Ações reencontradas (tIoU ≥ 0,5, confiança ≥ 0,3) | 16/16 | 15/16 |
+| Precisão contra as anotações / falsos positivos | 0,89 / 2 | 0,88 / 2 |
+| Erro médio da fronteira, início / fim (s) | 0,57 / 1,22 | 0,70 / 1,09 |
+| Classe da cabeça igual à anotada, por clipe / por ação | 82% / 88% | 82% / 88% |
+| Classe da cabeça igual à do denso, por clipe | 100% | 64% |
+| Cosseno com o denso, P10 / P50 | 1 / 1 | 0,63 / 0,78 |
+| Tempo por clipe (média, p95) | 1,90 s, 2,00 s | 1,33 s, 1,39 s |
+| Speedup medido (previsto) | 1,00× | 1,43× (1,37×) |
+
+**Leitura:**
+- Com 1536 tokens, a qualidade contra as anotações praticamente não muda, embora o embedding
+  se afaste do denso e a cabeça mude de classe em 36% dos clipes. A concordância com o denso,
+  e o cosseno, não medem a perda na tarefa: a cabeça acerta as anotações tanto quanto o
+  denso.
+- **Teto:** o denso acerta todas as ações, e as fronteiras ficam a cerca de 1 s das
+  anotadas. É o comportamento esperado de um modelo avaliado num vídeo do próprio treino.
+  O mAP está saturado, e degradações pequenas ficam invisíveis. Sinais mais finos (ações
+  reencontradas com confiança ≥ 0,3, fronteiras, confiança das detecções) ajudam, mas a
+  avaliação independente precisa de vídeos fora do treino do AMA: os 18 vídeos Dashboard
+  do subset `validation`, que não estão nesta máquina.
+- Na primeira tentativa, o avaliador do AMA falhou: ele usa `np.float`, removido do NumPy
+  1.24 (aqui roda a 2.2.6). A correção recria esse alias (o `float` nativo) e roda o
+  avaliador num único processo; o código do AMA não foi tocado (`8505d29`).
+
+### 2.3 Rodada de seleção
+
+`bash benchmark/run_qabp.sh selecao`, com 4 vídeos e as variantes denso, fixo
+1536/1024/512 e fixo 1536/1024 com atenção proporcional. A ordem das variantes alterna a
+cada batch. Em andamento.
