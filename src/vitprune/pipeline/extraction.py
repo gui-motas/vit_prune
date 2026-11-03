@@ -164,7 +164,8 @@ def encode_clips(
     Returns:
         The embeddings, ``[clips, embed_dim]`` in single precision, and what the
         adaptive budget decided: lists of tokens, regime, redundancy and motion, one
-        entry per clip in order; ``None`` for a plan that prunes nothing.
+        entry per clip in order, and for a quality-aware policy the reason and the
+        predicted risk too; ``None`` for a plan that prunes nothing.
     """
     _validate_encoding(batch, precision)
     adaptive = encoder.plan.prunes
@@ -180,6 +181,10 @@ def encode_clips(
                 record["regimes"] += budget.regimes.tolist()
                 record["redundancy"] += budget.statistics.redundancy.tolist()
                 record["motion"] += budget.statistics.motion.tolist()
+                if budget.decision is not None:
+                    record.setdefault("reasons", []).extend(budget.decision.reasons)
+                    record.setdefault("predicted_risk", []).extend(
+                        budget.decision.predicted_risk.tolist())
             else:
                 embeddings = encoder.encode(chunk)
             embeddings = embeddings.float().cpu()

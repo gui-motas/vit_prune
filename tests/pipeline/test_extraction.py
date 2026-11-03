@@ -156,3 +156,17 @@ def test_source_identity_uses_contents_not_only_size_and_name(tmp_path):
     second = SourceFile.of(path)
     assert first.bytes == second.bytes
     assert first.sha256 != second.sha256
+
+
+def test_a_quality_aware_extraction_records_why_each_clip_got_its_budget(quality_budget):
+    geometry = reference_geometry(depth=2)
+    backbone = reference_backbone(geometry)
+    torch.manual_seed(0)
+    clips = torch.randn(*geometry.input_shape(batch=4))
+    policy = quality_budget(backbone, geometry, clips, (16, 32, 48, 64), tolerance=0.5)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=1, budget=policy))
+
+    _, record = extraction.encode_clips(encoder, clips, batch=3, device="cpu", precision="off")
+    assert len(record["reasons"]) == 4 and set(record["reasons"]) <= {"ok",
+                                                                       "no_level_within_tolerance"}
+    assert len(record["predicted_risk"]) == 4

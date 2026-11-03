@@ -42,7 +42,12 @@ from vitprune.core.compressibility import (
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 from vitprune.core.inspection import TokenSelection
 from vitprune.core.merging import initial_sizes, merge_error, merge_tokens, size_weighted_mean
-from vitprune.core.policy import BudgetPolicy, FixedBudget
+from vitprune.core.policy import (
+    BudgetDecision,
+    BudgetPolicy,
+    FixedBudget,
+    QualityAwareBudgetPolicy,
+)
 from vitprune.core.protocols import missing_attributes
 from vitprune.core.scoring import apply_prior, score_tokens
 from vitprune.core.statistics import ClipStatistics, clip_statistics
@@ -60,16 +65,18 @@ class PruningPlan:
         spatial_prior: per-position multiplier, or ``None``.
         size_biased_attention: enables the proportional attention described in
             :mod:`vitprune.core.attention`. Experimental.
-        budget: what decides how many tokens each clip keeps: an adaptive policy, or
-            a fixed budget. Without one, nothing is pruned; the cut still marks where
-            clip statistics are measured, which is what calibration needs.
+        budget: what decides how many tokens each clip keeps: an adaptive policy, a
+            quality-aware one, or a fixed budget. Without one, nothing is pruned; the cut
+            still marks where clip statistics are measured, which is what calibration
+            needs. A quality-aware policy only holds for the selection it was calibrated
+            with, so it refuses another motion_weight, a prior or size-biased attention.
     """
 
     prune_layer: int = 2
     motion_weight: float = 0.5
     spatial_prior: torch.Tensor | None = None
     size_biased_attention: bool = False
-    budget: BudgetPolicy | FixedBudget | None = None
+    budget: BudgetPolicy | QualityAwareBudgetPolicy | FixedBudget | None = None
 
     def __post_init__(self) -> None:
         validate_prune_layer(self.prune_layer)
@@ -89,8 +96,21 @@ class PruningPlan:
             if not torch.isfinite(prior).all() or (prior < 0).any():
                 raise ValueError("spatial_prior must contain finite, non-negative values")
         if self.budget is not None:
-            if not isinstance(self.budget, (BudgetPolicy, FixedBudget)):
-                raise ValueError("budget must be a BudgetPolicy or a FixedBudget")
+            if not isinstance(self.budget, (BudgetPolicy, QualityAwareBudgetPolicy, FixedBudget)):
+                raise ValueError(
+                    "budget must be a BudgetPolicy, a QualityAwareBudgetPolicy or a FixedBudget"
+                )
+            budget = self.budget
+            if isinstance(budget, QualityAwareBudgetPolicy) and (
+                self.motion_weight != budget.motion_weight
+                or self.spatial_prior is not None
+                or self.size_biased_attention
+            ):
+                raise ValueError(
+                    f"the quality-aware policy was calibrated with motion_weight "
+                    f"{budget.motion_weight}, no spatial prior and no size-biased attention; "
+                    "its risk table does not hold for another selection"
+                )
             if self.prune_layer == 0:
                 raise ValueError("a budget needs a pruning layer; prune_layer is 0")
 
@@ -123,7 +143,11 @@ class PruningPlan:
         if self.spatial_prior is not None:
             extra += ", spatial prior"
         levels = "/".join(str(level) for level in self.budget.levels)
-        kind = "fixed" if isinstance(self.budget, FixedBudget) else "adaptive"
+        kind = (
+            "fixed" if isinstance(self.budget, FixedBudget)
+            else "quality-aware" if isinstance(self.budget, QualityAwareBudgetPolicy)
+            else "adaptive"
+        )
         return (
             f"{kind} budget of {levels} tokens after block {self.prune_layer}, "
             f"motion_weight {self.motion_weight}, policy {self.budget.version}{extra}"
@@ -137,11 +161,13 @@ class ClipBudget(NamedTuple):
         tokens: ``[batch]``, tokens each clip kept after the cut.
         regimes: ``[batch]``, the regime each clip fell in, from 0 upwards.
         statistics: the redundancy and motion the decision was taken from.
+        decision: what a quality-aware policy decided and why; ``None`` for the others.
     """
 
     tokens: torch.Tensor
     regimes: torch.Tensor
     statistics: ClipStatistics
+    decision: BudgetDecision | None = None
 
 
 class LevelEncoding(NamedTuple):
@@ -228,8 +254,9 @@ class PrunedEncoder(nn.Module):
         size zero.
         """
         grid = self._grid_at_cut(clips, needs_budget=True)
-        keeps, _ = self._keeps(grid)
-        scores = score_tokens(grid, self.plan.motion_weight, self.plan.spatial_prior)
+        base = score_tokens(grid, self.plan.motion_weight)
+        keeps, _ = self._keeps(grid, base)
+        scores = self._with_prior(base)
 
         batch, slices, _ = scores.shape
         widest = int(keeps.max())
@@ -288,8 +315,7 @@ class PrunedEncoder(nn.Module):
 
         grid = self._grid_at_cut(clips)
         base = score_tokens(grid, self.plan.motion_weight)
-        prior = self.plan.spatial_prior
-        scores = base if prior is None else apply_prior(base, prior)
+        scores = self._with_prior(base)
         features = compressibility_features(grid, base, cells=cells, top=top)
 
         count, slices, per_slice, dim = grid.shape
@@ -335,8 +361,9 @@ class PrunedEncoder(nn.Module):
             return self._pool(tokens, None), None
 
         grid = self._as_grid(tokens, self.geometry.tokens_per_slice)
-        keeps, budget = self._keeps(grid)
-        scores = score_tokens(grid, self.plan.motion_weight, self.plan.spatial_prior)
+        base = score_tokens(grid, self.plan.motion_weight)
+        keeps, budget = self._keeps(grid, base)
+        scores = self._with_prior(base)
 
         embeddings = None
         for keep, members in self._groups(keeps):
@@ -355,17 +382,32 @@ class PrunedEncoder(nn.Module):
             embeddings[members] = pooled
         return embeddings, budget
 
-    def _keeps(self, grid: torch.Tensor) -> tuple[torch.Tensor, ClipBudget]:
-        """Tokens kept per slice by each clip, and the record of the decision."""
+    def _keeps(self, grid: torch.Tensor, base: torch.Tensor) -> tuple[torch.Tensor, ClipBudget]:
+        """Tokens kept per slice by each clip, and the record of the decision.
+
+        ``base`` is the motion-aware score before any prior: what a quality-aware policy's
+        probe reads, while the selection that follows reads the score with the prior.
+        """
         budget = self.plan.budget
         statistics = clip_statistics(grid)
-        if isinstance(budget, FixedBudget):
+        decision = None
+        if isinstance(budget, QualityAwareBudgetPolicy):
+            features = compressibility_features(grid, base, statistics, budget.probe_cells,
+                                                budget.probe_top, probe=budget.uses_probe)
+            decision = budget.choose_budget(features)
+            tokens, regimes = decision.tokens, decision.regimes
+        elif isinstance(budget, FixedBudget):
             tokens = torch.full((grid.shape[0],), budget.tokens, device=grid.device)
             regimes = torch.zeros_like(tokens)
         else:
             tokens = budget.tokens(statistics)
             regimes = budget.regimes(statistics)
-        return tokens // self.geometry.temporal_slices, ClipBudget(tokens, regimes, statistics)
+        record = ClipBudget(tokens, regimes, statistics, decision)
+        return tokens // self.geometry.temporal_slices, record
+
+    def _with_prior(self, base: torch.Tensor) -> torch.Tensor:
+        prior = self.plan.spatial_prior
+        return base if prior is None else apply_prior(base, prior)
 
     @staticmethod
     def _groups(keeps: torch.Tensor):

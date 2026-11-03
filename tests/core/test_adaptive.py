@@ -161,3 +161,84 @@ def test_the_plan_names_a_fixed_budget():
     from vitprune.core.policy import FixedBudget
 
     assert "fixed budget of 32 tokens" in PruningPlan(budget=FixedBudget(32)).describe()
+
+
+QUALITY_LEVELS = (16, 32, 48, 64)
+
+
+def test_the_quality_aware_policy_decides_inside_the_encoder(
+    backbone, geometry, clips, quality_budget
+):
+    policy = quality_budget(backbone, geometry, clips, QUALITY_LEVELS, tolerance=0.5)
+    _, budget = _encoder(backbone, geometry, policy).encode_with_budget(clips)
+
+    assert budget.decision is not None
+    assert torch.equal(budget.tokens, budget.decision.tokens)
+    assert set(budget.tokens.tolist()) <= set(QUALITY_LEVELS)
+
+
+def test_a_quality_aware_plan_sending_every_clip_to_dense_reproduces_the_dense_path(
+    backbone, geometry, clips, quality_budget
+):
+    policy = quality_budget(backbone, geometry, clips, QUALITY_LEVELS, tolerance=1e-12)
+    found = _encoder(backbone, geometry, policy).encode(clips)
+    dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
+    assert torch.equal(found, dense)
+
+
+def test_a_batch_mixing_dense_and_merged_clips_keeps_their_order(
+    backbone, geometry, clips, quality_budget
+):
+    """Half the clips fall in a bin where every level is safe, half where none is."""
+    policy = replace(quality_budget(backbone, geometry, clips, QUALITY_LEVELS),
+                     risk=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)), tolerance=0.5)
+    encoder = _encoder(backbone, geometry, policy)
+    _, budget = encoder.encode_with_budget(clips)
+    together = encoder.encode(clips)
+    alone = torch.cat([encoder.encode(clips[i : i + 1]) for i in range(clips.shape[0])])
+
+    assert set(budget.tokens.tolist()) == {16, 64}
+    assert torch.allclose(together, alone, atol=1e-10)
+
+
+@pytest.mark.parametrize("selection", [
+    {"motion_weight": 0.3}, {"spatial_prior": torch.ones(16)}, {"size_biased_attention": True},
+])
+def test_a_quality_aware_policy_refuses_another_selection(
+    backbone, geometry, clips, quality_budget, selection
+):
+    policy = quality_budget(backbone, geometry, clips, QUALITY_LEVELS)
+    with pytest.raises(ValueError, match="calibrated"):
+        PruningPlan(prune_layer=1, budget=policy, **selection)
+
+
+def test_without_the_probe_the_encoder_never_probes(
+    backbone, geometry, clips, quality_budget, monkeypatch
+):
+    from vitprune.core import compressibility
+
+    policy = quality_budget(backbone, geometry, clips, QUALITY_LEVELS, alpha=1.0)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the probe must not run")
+
+    monkeypatch.setattr(compressibility, "probe_errors", never)
+    _, budget = _encoder(backbone, geometry, policy).encode_with_budget(clips)
+    assert "non_finite" not in budget.decision.reasons
+
+
+def test_selection_works_with_a_quality_aware_policy(backbone, geometry, clips, quality_budget):
+    policy = replace(quality_budget(backbone, geometry, clips, QUALITY_LEVELS),
+                     risk=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)), tolerance=0.5)
+    encoder = _encoder(backbone, geometry, policy)
+    _, budget = encoder.encode_with_budget(clips)
+    selection = encoder.select(clips)
+    for clip in range(clips.shape[0]):
+        assert selection.kept_in(clip) == budget.tokens[clip].item() // geometry.temporal_slices
+
+
+def test_the_plan_names_a_quality_aware_policy(backbone, geometry, clips, quality_budget):
+    policy = quality_budget(backbone, geometry, clips, QUALITY_LEVELS)
+    described = PruningPlan(prune_layer=1, budget=policy).describe()
+    assert "quality-aware budget of 16/32/48/64 tokens" in described
+    assert policy.version in described
