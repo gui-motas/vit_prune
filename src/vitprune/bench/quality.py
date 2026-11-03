@@ -100,6 +100,19 @@ def spearman(x: Sequence[float], y: Sequence[float]) -> float:
     return _pearson(_ranks(x), _ranks(y))
 
 
+def partial_spearman(x: Sequence[float], y: Sequence[float], control: Sequence[float]) -> float:
+    """Spearman's correlation of ``x`` and ``y`` once a straight line in the ranks of
+    ``control`` is taken out of both: what ``x`` tells about ``y`` beyond ``control``."""
+    rc = _ranks(control)
+    design = np.c_[np.ones_like(rc), rc]
+
+    def residual(values: Sequence[float]) -> np.ndarray:
+        ranks = _ranks(values)
+        return ranks - design @ np.linalg.lstsq(design, ranks, rcond=None)[0]
+
+    return _pearson(residual(x), residual(y))
+
+
 def permutation_p(
     x: Sequence[float],
     y: Sequence[float],

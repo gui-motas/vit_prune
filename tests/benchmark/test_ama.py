@@ -283,3 +283,18 @@ def test_an_evaluated_video_without_annotation_is_refused(fake_ama, tmp_path):
         run_ama(**fake_ama.args, labels=_labels(tmp_path / "labels.json", stems=("w",)))
 
     assert not (fake_ama.out / "ama" / "job.json").exists()
+
+
+def test_with_labels_the_map_is_also_given_per_video(fake_ama, tmp_path):
+    run = json.loads((fake_ama.out / "run.json").read_text("utf-8"))
+    run["schedules"]["w"] = run["schedules"]["v"]
+    (fake_ama.out / "run.json").write_text(json.dumps(run), encoding="utf-8")
+    for variant in VARIANTS:
+        np.savez(fake_ama.out / "features" / variant / "w.npz", feats=np.zeros((4, 6), np.float32))
+
+    run_ama(**fake_ama.args, labels=_labels(tmp_path / "labels.json"))
+
+    found = json.loads((fake_ama.out / "ama" / "denso" / "map.json").read_text("utf-8"))
+    assert found["average"] == pytest.approx(0.22)  # two detections, two annotated videos
+    assert set(found["by_video"]) == {"v", "w"}
+    assert found["by_video"]["w"]["average"] == pytest.approx(0.11)  # its own detection only

@@ -232,6 +232,16 @@ def false_positives(reference: pd.DataFrame, found: pd.DataFrame, tiou: float = 
     return int((best_tiou(found, reference) < tiou).sum())
 
 
+def matched_confidence(reference: pd.DataFrame, found: pd.DataFrame, tiou: float = TIOU,
+                       min_score: float = MIN_SCORE) -> float | None:
+    """The mean confidence of the detections that find a reference action."""
+    reference = reference[reference["score"] >= min_score].reset_index(drop=True)
+    found = found[found["score"] >= min_score].reset_index(drop=True)
+    best, where = _best(reference, found)
+    matched = best >= tiou
+    return float(found.loc[where[matched], "score"].mean()) if matched.any() else None
+
+
 def clip_accuracy(probabilities: np.ndarray, centres: np.ndarray,
                   actions: pd.DataFrame) -> tuple[int, int]:
     """Clips whose centre lies in an annotated action and whose top class is that action's,
@@ -289,11 +299,11 @@ def _span(record: RunRecord, stem: str) -> float:
 
 
 def annotated(record: RunRecord, frame: pd.DataFrame, probabilities: dict, variant: str,
-              actions: pd.DataFrame) -> dict:
+              actions: pd.DataFrame, stems: list[str] | None = None) -> dict:
     """The head against the annotations: per clip, by the action holding its centre, and per
     action, by the mean of the clips wholly inside it."""
     correct = counted = right = whole = 0
-    for stem in record.stems:
+    for stem in record.stems if stems is None else stems:
         mine = actions[actions["video-id"] == stem]
         starts, span = _starts(frame, variant, stem), _span(record, stem)
         hits, clips = clip_accuracy(probabilities[variant][stem], starts + span / 2, mine)
@@ -306,6 +316,28 @@ def annotated(record: RunRecord, frame: pd.DataFrame, probabilities: dict, varia
                 right += int(found == int(action["label"]))
     return {"clip": correct / counted if counted else None,
             "action": right / whole if whole else None}
+
+
+def task_metrics(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
+                 detections: dict | None, actions: pd.DataFrame, variant: str, tiou: float,
+                 min_score: float, stems: list[str] | None = None) -> dict:
+    """A variant against the annotated actions of ``stems`` (every video by default)."""
+    stems = record.stems if stems is None else stems
+    mine = actions[actions["video-id"].isin(stems)]
+    row = {}
+    if detections is not None:
+        found = detections[variant][detections[variant]["video-id"].isin(stems)]
+        got = agreement(mine, found, tiou, min_score)
+        edges = boundary_errors(mine, found, tiou, min_score)
+        row |= {GT_RECALL: got["recall"], GT_PRECISION: got["precision"],
+                "Falsos positivos": false_positives(mine, found, tiou, min_score),
+                "Erro médio no início (s)": edges["start"],
+                "Erro médio no fim (s)": edges["end"],
+                "Confiança média das reencontradas": matched_confidence(mine, found, tiou,
+                                                                        min_score)}
+    head = annotated(record, frame, probabilities, variant, mine, stems)
+    return row | {"Acurácia de classe por clipe (anotações)": head["clip"],
+                  "Acurácia de classe por ação (anotações)": head["action"]}
 
 
 def summary(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
@@ -333,17 +365,8 @@ def summary(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
                                         strict=True)}
             row["mAP médio"] = scores[variant]["average"]
         if actions is not None:
-            if detections is not None:
-                got = agreement(actions, detections[variant], tiou, min_score)
-                edges = boundary_errors(actions, detections[variant], tiou, min_score)
-                row |= {GT_RECALL: got["recall"], GT_PRECISION: got["precision"],
-                        "Falsos positivos": false_positives(actions, detections[variant], tiou,
-                                                            min_score),
-                        "Erro médio no início (s)": edges["start"],
-                        "Erro médio no fim (s)": edges["end"]}
-            head = annotated(record, frame, probabilities, variant, actions)
-            row |= {"Acurácia de classe por clipe (anotações)": head["clip"],
-                    "Acurácia de classe por ação (anotações)": head["action"]}
+            row |= task_metrics(record, frame, probabilities, detections, actions, variant,
+                                tiou, min_score)
         row |= {
             "Tokens médios por clipe": np.mean(tokens),
             "Tokens mantidos (%)": np.mean(tokens) / GEOMETRY.num_tokens,
@@ -394,7 +417,12 @@ def by_detection(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
         name = short_label(variant) if variant != "denso" else SHORT["denso"]
         if detections is not None:
             found = detections[variant]
-            table[f"{name}: melhor tIoU"] = best_tiou(reference, found[found["score"] >= min_score])
+            found = found[found["score"] >= min_score].reset_index(drop=True)
+            best, where = _best(reference, found)
+            table[f"{name}: melhor tIoU"] = best
+            if not dense:
+                table[f"{name}: confiança"] = [found.loc[at, "score"] if overlap > 0 else None
+                                               for overlap, at in zip(best, where, strict=True)]
         classes = []
         for _, row in reference.iterrows():
             stem = row["video-id"]
@@ -403,6 +431,58 @@ def by_detection(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
             classes.append(None if found_class is None else f"classe {found_class}")
         table[f"{name}: classe no trecho"] = classes
     return table
+
+
+def per_video_task(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
+                   detections: dict | None, actions: pd.DataFrame, scores: dict | None,
+                   tiou: float, min_score: float) -> pd.DataFrame:
+    """Each variant on each video, against that video's annotated actions, with its cost."""
+    table = []
+    for stem in record.stems:
+        dense = frame[(frame["video"] == stem) & (frame["variant"] == "denso")]["seconds"]
+        for variant in record.variants:
+            rows = frame[(frame["video"] == stem) & (frame["variant"] == variant)]
+            row = {"Vídeo": stem, "Variante": variant_name(variant),
+                   "Ações anotadas": int((actions["video-id"] == stem).sum())}
+            if scores is not None:
+                row["mAP médio"] = scores[variant].get("by_video", {}).get(stem, {}).get("average")
+            row |= task_metrics(record, frame, probabilities, detections, actions, variant, tiou,
+                                min_score, [stem])
+            row |= {"Cosseno P50 com o denso": rows["cosine_to_dense"].median(),
+                    "Tempo médio por clipe (s)": rows["seconds"].mean(),
+                    "Tempo p50 por clipe (s)": rows["seconds"].median(),
+                    "Tempo p95 por clipe (s)": rows["seconds"].quantile(0.95),
+                    "Tempo do vídeo (s)": rows["seconds"].sum(),
+                    "Speedup medido": dense.mean() / rows["seconds"].mean()}
+            table.append(row)
+    return pd.DataFrame(table)
+
+
+def per_class(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
+              detections: dict | None, actions: pd.DataFrame, tiou: float,
+              min_score: float) -> pd.DataFrame:
+    """Each class's annotated actions, per variant: how many are found again, how well and
+    how confidently, and the class the head gives them. Few actions per class: read as
+    counts, not as rates."""
+    table = []
+    for label, group in actions.groupby("label"):
+        for variant in record.variants:
+            row = {"Classe": f"classe {label}", "Variante": variant_name(variant),
+                   "Ações": len(group)}
+            if detections is not None:
+                found = detections[variant]
+                found = found[found["score"] >= min_score].reset_index(drop=True)
+                best, where = _best(group, found)
+                matched = best >= tiou
+                row |= {"Reencontradas": int(matched.sum()),
+                        "tIoU médio do melhor par": float(best.mean()),
+                        "Confiança média das reencontradas":
+                            float(found.loc[where[matched], "score"].mean())
+                            if matched.any() else None}
+            head = annotated(record, frame, probabilities, variant, group)
+            row["Acurácia de classe por ação (anotações)"] = head["action"]
+            table.append(row)
+    return pd.DataFrame(table)
 
 
 def per_video(frame: pd.DataFrame, area: float) -> pd.DataFrame:
@@ -757,6 +837,10 @@ def make_report(out: str | Path, min_score: float = MIN_SCORE, tiou: float = TIO
                     scores)
     sheets = {"Resumo": table}
     if actions is not None:
+        sheets["Por vídeo e variante"] = per_video_task(record, frame, probabilities, detections,
+                                                        actions, scores, tiou, min_score)
+        sheets["Por classe"] = per_class(record, frame, probabilities, detections, actions, tiou,
+                                         min_score)
         sheets["Por ação anotada"] = by_detection(record, frame, probabilities, detections,
                                                   min_score, reference=actions)
     if detections is not None:

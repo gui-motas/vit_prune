@@ -271,7 +271,8 @@ def _policy_run(tmp_path):
         _d(found).to_csv(out / "ama" / variant / "predictions.csv", index=False)
         average = 0.6 if variant == "denso" else 0.3
         (out / "ama" / variant / "map.json").write_text(json.dumps(
-            {"tiou": [0.1, 0.2, 0.3, 0.4, 0.5], "map": [average] * 5, "average": average}))
+            {"tiou": [0.1, 0.2, 0.3, 0.4, 0.5], "map": [average] * 5, "average": average,
+             "by_video": {"v": {"map": [average] * 5, "average": average}}}))
     (out / "clips.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
     (out / "ama" / "labels.json").write_text(json.dumps({"database": {"v": {
         "subset": "validation", "annotations": [
@@ -316,3 +317,25 @@ def test_the_policy_study_report_separates_fidelity_agreement_and_annotations(tm
     figures = out / "figuras"
     assert (figures / "qualidade-custo.png").exists()
     assert not list(figures.glob("mascaras-*.png"))
+
+
+def test_the_task_is_also_reported_per_video_and_per_class(tmp_path):
+    pytest.importorskip("openpyxl")
+    out = _policy_run(tmp_path)
+
+    book = pd.ExcelFile(report.make_report(out))
+
+    videos = book.parse("Por vídeo e variante").set_index("Variante")
+    fixed = report.variant_name("fixo_32")
+    assert videos.loc[fixed, "mAP médio"] == pytest.approx(0.3)
+    assert videos.loc[fixed, "Ações anotadas"] == 2
+    assert videos.loc[fixed, report.GT_RECALL] == 0.5
+    assert videos.loc[fixed, "Tempo do vídeo (s)"] == pytest.approx(1.6)  # 4 clips of 0.4 s
+    classes = book.parse("Por classe")
+    second = classes[(classes["Classe"] == "classe 2") & (classes["Variante"] == fixed)]
+    assert second["Reencontradas"].tolist() == [0]
+    dense = classes[(classes["Classe"] == "classe 2")
+                    & (classes["Variante"] == report.variant_name("denso"))]
+    assert dense["Confiança média das reencontradas"].tolist() == [pytest.approx(0.8)]
+    actions = book.parse("Por ação anotada")
+    assert actions["Denso: confiança"].tolist() == [pytest.approx(0.9), pytest.approx(0.8)]

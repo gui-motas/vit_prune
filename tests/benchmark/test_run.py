@@ -5,6 +5,7 @@ around them: sampling clips, running the four variants, and writing the features
 rows, the figures' inputs and the record.
 """
 
+import csv
 import json
 
 import numpy as np
@@ -252,3 +253,42 @@ def test_the_legacy_overlap_with_the_evaluated_videos_is_recorded(bench, model, 
     overlap = json.loads(bench.record.read_text("utf-8"))["calibration_overlap"]
     assert overlap["legacy_recalibrada"] == {"videos": ["v"], "drivers": ["v"]}
     assert overlap["legacy_original"] == {"videos": [], "drivers": []}
+
+
+def test_the_proxy_study_joins_the_cut_signals_with_what_the_head_lost(bench, model, geometry):
+    from vitprune.core import PrunedEncoder, PruningPlan
+    from vitprune.pipeline.benchmark import proxy
+
+    bench.policy, bench.fixed = None, (32,)
+    inference.run_benchmark(bench)
+    ama = bench.out / "ama"
+    ama.mkdir()
+    (ama / "labels.json").write_text(json.dumps({"database": {"v": {
+        "subset": "validation", "annotations": [{"label_id": 1, "segment": [0.0, 4.0]},
+                                                 {"label_id": 2, "segment": [4.0, 8.0]}]}}}))
+    columns = "video-id,t-start,t-end,label,score\n"
+    for variant, rows in {"denso": ["v,0.0,4.0,1,0.9", "v,4.0,8.0,2,0.9"],
+                          "fixo_32": ["v,0.0,4.0,1,0.9"]}.items():
+        (ama / variant).mkdir()
+        (ama / variant / "predictions.csv").write_text(columns + "\n".join(rows) + "\n")
+    encoder = PrunedEncoder(model, geometry, PruningPlan(prune_layer=bench.prune_layer))
+
+    proxy.collect_cut_features(encoder, bench.out, device="cpu", precision="off", batch=2,
+                               cells=(2, 2), top=2, progress=lambda _: None)
+    found = proxy.analyse(bench.out, permutations=50)
+
+    cut = [json.loads(line) for line in
+           (bench.out / "proxy" / "cut_features.jsonl").read_text("utf-8").splitlines()]
+    assert [row["start"] for row in cut] == [0, 16, 32, 48]
+    variant = found["variants"]["fixo_32"]
+    assert variant["labelled_clips"] == 4  # windows of 2 s inside the two 4 s actions
+    assert set(variant["signals"]) == {"probe_p90", "probe_mean", "g", "motion", "redundancy",
+                                       "drift"}
+    assert variant["actions"] == {"annotated": 2, "found_dense": 2, "found": 1, "lost": 1}
+    with (bench.out / "proxy" / "clips.csv").open(encoding="utf-8") as stream:
+        clips = list(csv.DictReader(stream))
+    assert [float(c["start_s"]) for c in clips] == [0.0, 2.0, 4.0, 6.0]  # frames over 8 fps
+    with (bench.out / "proxy" / "actions.csv").open(encoding="utf-8") as stream:
+        actions = list(csv.DictReader(stream))
+    assert [(a["label"], a["clips"], a["found"]) for a in actions] == [
+        ("1", "2", "True"), ("2", "2", "False")]

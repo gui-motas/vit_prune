@@ -283,6 +283,19 @@ class PrunedEncoder(nn.Module):
         return clip_statistics(self._grid_at_cut(clips))
 
     @torch.no_grad()
+    def features(
+        self,
+        clips: torch.Tensor,
+        cells: tuple[int, int] = PROBE_CELLS,
+        top: int = PROBE_TOP,
+    ) -> CompressibilityFeatures:
+        """What a budget sees of each clip at the pruning layer: the statistics and the
+        probe on the scores before any prior. Only the blocks up to the cut run."""
+        grid = self._grid_at_cut(clips)
+        base = score_tokens(grid, self.plan.motion_weight)
+        return compressibility_features(grid, base, cells=cells, top=top)
+
+    @torch.no_grad()
     def encode_levels(
         self,
         clips: torch.Tensor,

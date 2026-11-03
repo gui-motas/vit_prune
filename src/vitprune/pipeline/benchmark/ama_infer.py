@@ -22,6 +22,7 @@ import csv
 import json
 import platform
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -88,24 +89,38 @@ def detect(model, cfg: dict, stride: int, stem: str, video: dict, feats: np.ndar
 
 
 def score(labels: str, rows: list, destination: Path) -> None:
-    """The AMA's mAP per tIoU against the annotations, and its average; zero without any
-    detection, which the evaluator does not take."""
-    if rows:
-        import pandas as pd
-        from libs.utils import ANETdetection
+    """The AMA's mAP per tIoU against the annotations and its average, over every video and
+    for each video on its own; zero without any detection, which the evaluator does not
+    take."""
+    found, average = evaluate(labels, rows, destination / "evaluated.csv")
+    database = json.loads(Path(labels).read_text(encoding="utf-8"))["database"]
+    by_video = {}
+    with tempfile.TemporaryDirectory() as scratch:
+        for stem, video in database.items():
+            single = Path(scratch) / f"{stem}.json"
+            single.write_text(json.dumps({"database": {stem: video}}), encoding="utf-8")
+            values, mean = evaluate(str(single), [row for row in rows if row[0] == stem],
+                                    Path(scratch) / f"{stem}.csv")
+            by_video[stem] = {"map": values, "average": mean}
+    (destination / "map.json").write_text(json.dumps(
+        {"tiou": TIOUS, "map": found, "average": average, "by_video": by_video}), encoding="utf-8")
 
-        if not hasattr(np, "float"):
-            np.float = float  # the AMA's evaluator still uses this alias of the builtin float
-        # One worker keeps the evaluation in this process, where the alias exists.
-        evaluator = ANETdetection(labels, split="validation", tiou_thresholds=np.array(TIOUS),
-                                  num_workers=1)
-        found, average, _ = evaluator.evaluate(pd.DataFrame(rows, columns=COLUMNS),
-                                               str(destination / "evaluated.csv"), verbose=False)
-        found, average = [float(value) for value in found], float(average)
-    else:
-        found, average = [0.0] * len(TIOUS), 0.0
-    (destination / "map.json").write_text(
-        json.dumps({"tiou": TIOUS, "map": found, "average": average}), encoding="utf-8")
+
+def evaluate(labels: str, rows: list, output: Path) -> tuple[list[float], float]:
+    """The AMA's own evaluator on ``rows`` against ``labels``: mAP per tIoU and average."""
+    if not rows:
+        return [0.0] * len(TIOUS), 0.0
+    import pandas as pd
+    from libs.utils import ANETdetection
+
+    if not hasattr(np, "float"):
+        np.float = float  # the AMA's evaluator still uses this alias of the builtin float
+    # One worker keeps the evaluation in this process, where the alias exists.
+    evaluator = ANETdetection(labels, split="validation", tiou_thresholds=np.array(TIOUS),
+                              num_workers=1)
+    found, average, _ = evaluator.evaluate(pd.DataFrame(rows, columns=COLUMNS), str(output),
+                                           verbose=False)
+    return [float(value) for value in found], float(average)
 
 
 def main(argv: list[str]) -> int:

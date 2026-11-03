@@ -77,3 +77,16 @@ def test_the_probe_is_timed_per_clip():
                        cells=(2, 2), top=2)
     assert found["probe_ms_per_clip"] > 0 and found["statistics_ms_per_clip"] > 0
     assert found["batch"] == 2 and found["device"] == "cpu"
+
+
+def test_partial_spearman_removes_what_the_control_explains():
+    from vitprune.bench.quality import partial_spearman
+
+    rng = np.random.default_rng(2)
+    control = rng.random(200)
+    x = control + 0.01 * rng.random(200)
+    y = control + 0.01 * rng.random(200)  # both follow the control, not each other
+    assert spearman(x, y) > 0.9
+    assert abs(partial_spearman(x, y, control)) < 0.3
+    extra = rng.random(200)
+    assert partial_spearman(control + extra, control + extra, control) > 0.9

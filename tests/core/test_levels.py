@@ -72,3 +72,16 @@ def test_levels_and_depths_are_validated(backbone, geometry, clips, levels, dept
     with pytest.raises(ValueError):
         PrunedEncoder(backbone, geometry, plan).encode_levels(clips, levels, depths=depths,
                                                               **PROBE)
+
+
+def test_the_features_at_the_cut_need_only_the_blocks_up_to_it(backbone, geometry, clips):
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(prune_layer=1))
+    calls = []
+    hook = backbone.blocks[-1].register_forward_hook(lambda *args: calls.append(1))
+    found = encoder.features(clips, **PROBE)
+    hook.remove()
+
+    assert not calls  # the last block never ran
+    expected = _levels(backbone, geometry, clips).features
+    for name, value in found._asdict().items():
+        assert torch.allclose(value, getattr(expected, name)), name
