@@ -102,6 +102,32 @@ def merge_tokens(
     return MergedTokens(weighted_sum / size_sum.clamp(min=1e-6), size_sum)
 
 
+@torch.no_grad()
+def merge_error(
+    tokens: torch.Tensor, scores: torch.Tensor, keep: int, merged: MergedTokens
+) -> torch.Tensor:
+    """How badly each original token is represented after a merge.
+
+    ``1 - cos(token, representative)``: a kept token is represented by its own merged
+    value, a pruned one by the merged value of the kept token it went into. This is the
+    loss per token. The difference between the pooled means before and after the merge
+    is zero by construction and measures nothing.
+
+    Args:
+        tokens, scores, keep: what :func:`merge_tokens` was given.
+        merged: what it returned.
+
+    Returns:
+        ``[batch, slices, tokens]``.
+    """
+    kept_at = scores.argsort(dim=-1, descending=True)[..., :keep].sort(dim=-1).values
+    destination = _nearest_kept_token(tokens, _take(tokens, kept_at))
+    # A kept token stands for itself, even when another kept token points the same way.
+    own = torch.arange(keep, device=tokens.device).expand_as(kept_at)
+    destination = destination.scatter(2, kept_at, own)
+    return 1.0 - F.cosine_similarity(tokens, _take(merged.tokens, destination), dim=-1)
+
+
 def size_weighted_mean(tokens: torch.Tensor, sizes: torch.Tensor) -> torch.Tensor:
     """Size-weighted mean pooling, producing the clip embedding.
 

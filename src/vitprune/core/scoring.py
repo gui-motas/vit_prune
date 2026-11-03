@@ -66,7 +66,7 @@ def score_tokens(
     )
 
     if spatial_prior is not None:
-        score = _apply_prior(score, spatial_prior)
+        score = apply_prior(score, spatial_prior)
     return score
 
 
@@ -126,7 +126,12 @@ def _combine(uniqueness: torch.Tensor, motion: torch.Tensor, weight: float) -> t
     )
 
 
-def _apply_prior(score: torch.Tensor, prior: torch.Tensor) -> torch.Tensor:
+def apply_prior(score: torch.Tensor, prior: torch.Tensor) -> torch.Tensor:
+    """Weight scores by position, as ``score_tokens`` does with ``spatial_prior``.
+
+    Separate so that a budget can read the scores before the prior and the selection
+    after it, without scoring twice.
+    """
     tokens = score.shape[-1]
     if prior.ndim != 1 or not torch.isfinite(prior).all() or (prior < 0).any():
         raise ValueError("spatial prior must be one-dimensional, finite and non-negative")

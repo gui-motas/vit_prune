@@ -123,3 +123,41 @@ def test_the_budget_must_be_a_policy():
 
 def test_the_plan_names_its_policy(policy):
     assert policy.version in PruningPlan(budget=policy).describe()
+
+
+def test_a_fixed_budget_keeps_the_same_tokens_in_every_clip(backbone, geometry, clips):
+    from vitprune.core.policy import FixedBudget
+
+    _, budget = _encoder(backbone, geometry, FixedBudget(32)).encode_with_budget(clips)
+    assert budget.tokens.tolist() == [32] * clips.shape[0]
+    assert budget.regimes.tolist() == [0] * clips.shape[0]
+
+
+def test_a_fixed_budget_of_every_token_is_the_dense_path_exactly(
+    backbone, geometry, clips, monkeypatch
+):
+    """The full level is the dense path itself, not 2048 tokens selected and regrouped."""
+    from vitprune.core import encoder as module
+    from vitprune.core.policy import FixedBudget
+
+    def never(*args, **kwargs):
+        raise AssertionError("the full level must not merge")
+
+    monkeypatch.setattr(module, "merge_tokens", never)
+    full = _encoder(backbone, geometry, FixedBudget(geometry.num_tokens)).encode(clips)
+    dense = PrunedEncoder(backbone, geometry, PruningPlan.dense()).encode(clips)
+    assert torch.equal(full, dense)
+
+
+@pytest.mark.parametrize("tokens", [18, 0])
+def test_a_fixed_budget_must_fit_the_grid(backbone, geometry, tokens):
+    from vitprune.core.policy import FixedBudget
+
+    with pytest.raises(ValueError):
+        _encoder(backbone, geometry, FixedBudget(tokens))
+
+
+def test_the_plan_names_a_fixed_budget():
+    from vitprune.core.policy import FixedBudget
+
+    assert "fixed budget of 32 tokens" in PruningPlan(budget=FixedBudget(32)).describe()

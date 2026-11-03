@@ -94,13 +94,7 @@ class BudgetPolicy:
 
     def validate_for(self, geometry: ClipGeometry) -> None:
         """Check that every level fits the token grid of a concrete backbone."""
-        slices = geometry.temporal_slices
-        for level in self.levels:
-            if level % slices or level > geometry.num_tokens:
-                raise ValueError(
-                    f"budget level {level} must be a multiple of the {slices} temporal "
-                    f"slices and at most {geometry.num_tokens} tokens"
-                )
+        _check_levels_fit(self.levels, geometry)
 
     def score(self, statistics: ClipStatistics) -> torch.Tensor:
         """``g`` for each clip, in ``[0, 1]``. Higher asks for more tokens."""
@@ -201,6 +195,46 @@ def calibrate_policy(
     if any(b <= a for a, b in pairwise(thresholds)):
         raise ValueError("the calibration clips vary too little to separate the regimes")
     return replace(draft, thresholds=thresholds)
+
+
+def _check_levels_fit(levels: Sequence[int], geometry: ClipGeometry) -> None:
+    slices = geometry.temporal_slices
+    for level in levels:
+        if level % slices or level > geometry.num_tokens:
+            raise ValueError(
+                f"budget level {level} must be a multiple of the {slices} temporal "
+                f"slices and at most {geometry.num_tokens} tokens"
+            )
+
+
+@dataclass(frozen=True)
+class FixedBudget:
+    """Every clip keeps the same number of tokens: the baseline a policy is judged against.
+
+    With every token of the clip, the clip takes the dense path itself, with no merge.
+    """
+
+    tokens: int
+
+    def __post_init__(self) -> None:
+        if isinstance(self.tokens, bool) or not isinstance(self.tokens, Integral):
+            raise ValueError("a fixed budget keeps a whole number of tokens")
+        if self.tokens < 1:
+            raise ValueError(f"a fixed budget keeps at least one token, got {self.tokens}")
+
+    @property
+    def levels(self) -> tuple[int, ...]:
+        return (self.tokens,)
+
+    def validate_for(self, geometry: ClipGeometry) -> None:
+        _check_levels_fit(self.levels, geometry)
+
+    @property
+    def version(self) -> str:
+        return f"fixed-{self.tokens}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"policy_type": "fixed", "tokens": self.tokens, "version": self.version}
 
 
 def _rank(values: torch.Tensor, reference: tuple[float, ...]) -> torch.Tensor:

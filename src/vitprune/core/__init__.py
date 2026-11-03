@@ -24,10 +24,16 @@ from vitprune.core.compat import CompatibilityReport, check_backbone
 from vitprune.core.encoder import ClipBudget, PrunedEncoder, PruningPlan
 from vitprune.core.geometry import ClipGeometry
 from vitprune.core.inspection import TokenSelection
-from vitprune.core.merging import MergedTokens, initial_sizes, merge_tokens, size_weighted_mean
-from vitprune.core.policy import BudgetPolicy, calibrate_policy
+from vitprune.core.merging import (
+    MergedTokens,
+    initial_sizes,
+    merge_error,
+    merge_tokens,
+    size_weighted_mean,
+)
+from vitprune.core.policy import BudgetPolicy, FixedBudget, calibrate_policy
 from vitprune.core.priors import box_prior, top_rows_prior
-from vitprune.core.scoring import score_tokens
+from vitprune.core.scoring import apply_prior, score_tokens
 from vitprune.core.statistics import ClipStatistics, clip_statistics
 
 __all__ = [
@@ -36,15 +42,18 @@ __all__ = [
     "ClipGeometry",
     "ClipStatistics",
     "CompatibilityReport",
+    "FixedBudget",
     "MergedTokens",
     "PrunedEncoder",
     "PruningPlan",
     "TokenSelection",
+    "apply_prior",
     "box_prior",
     "calibrate_policy",
     "check_backbone",
     "clip_statistics",
     "initial_sizes",
+    "merge_error",
     "merge_tokens",
     "score_tokens",
     "size_weighted_mean",

@@ -151,3 +151,40 @@ def test_with_equal_sizes_pooling_is_the_plain_mean():
     tokens = torch.randn(2, 10, 4, dtype=torch.float64)
     sizes = torch.ones(2, 10, 1, dtype=torch.float64)
     assert torch.allclose(size_weighted_mean(tokens, sizes), tokens.mean(dim=1))
+
+
+def test_merge_error_is_zero_when_every_token_is_kept():
+    from vitprune.core.merging import merge_error
+
+    tokens, sizes = _setup()
+    scores = torch.rand(*tokens.shape[:3], dtype=torch.float64)
+    merged = merge_tokens(tokens, sizes, scores, keep=tokens.shape[2])
+    assert torch.allclose(merge_error(tokens, scores, tokens.shape[2], merged),
+                          torch.zeros(tokens.shape[:3], dtype=torch.float64), atol=1e-12)
+
+
+def test_merge_error_is_zero_for_identical_tokens():
+    from vitprune.core.merging import merge_error
+
+    tokens = torch.ones(1, 2, 6, 4, dtype=torch.float64)
+    scores = torch.rand(1, 2, 6, dtype=torch.float64)
+    merged = merge_tokens(tokens, initial_sizes(tokens), scores, keep=1)
+    assert torch.allclose(merge_error(tokens, scores, 1, merged), torch.zeros(1, 2, 6,
+                          dtype=torch.float64), atol=1e-6)
+
+
+def test_merge_error_is_high_for_an_incompatible_group():
+    """The mean survives the merge exactly while each token is badly represented: the
+    difference of the means says nothing about what was lost."""
+    from vitprune.core.merging import merge_error
+
+    tokens = torch.zeros(1, 1, 8, 4, dtype=torch.float64)
+    tokens[0, 0, :4, 0] = 1.0  # along e1
+    tokens[0, 0, 4:, 1] = 1.0  # along e2
+    scores = torch.tensor([[[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]]], dtype=torch.float64)
+    merged = merge_tokens(tokens, initial_sizes(tokens), scores, keep=1)
+
+    error = merge_error(tokens, scores, 1, merged)[0, 0]
+    # The one kept token becomes (e1 + e2) / 2: every token sits 45 degrees from it.
+    assert torch.allclose(error, torch.full((8,), 1 - 2**-0.5, dtype=torch.float64))
+    assert torch.allclose(size_weighted_mean(*_flat(merged)), tokens[0, 0].mean(dim=0)[None])

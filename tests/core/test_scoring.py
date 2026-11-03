@@ -134,3 +134,11 @@ def test_box_prior_without_boxes_marks_nothing():
 def test_box_prior_rejects_boxes_outside_the_frame_or_empty(box):
     with pytest.raises(ValueError, match="box"):
         box_prior(grid_size=4, boxes=[box])
+
+
+def test_the_prior_applied_afterwards_gives_the_same_scores():
+    from vitprune.core.scoring import apply_prior
+
+    t = _tokens()
+    prior = torch.linspace(0.0, 1.0, t.shape[2])  # position 0 has weight zero
+    assert torch.equal(apply_prior(score_tokens(t, 0.5), prior), score_tokens(t, 0.5, prior))
