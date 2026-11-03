@@ -21,6 +21,11 @@ Typical use::
 """
 
 from vitprune.core.compat import CompatibilityReport, check_backbone
+from vitprune.core.compressibility import (
+    CompressibilityFeatures,
+    compressibility_features,
+    fixed_anchors,
+)
 from vitprune.core.encoder import ClipBudget, PrunedEncoder, PruningPlan
 from vitprune.core.geometry import ClipGeometry
 from vitprune.core.inspection import TokenSelection
@@ -42,6 +47,7 @@ __all__ = [
     "ClipGeometry",
     "ClipStatistics",
     "CompatibilityReport",
+    "CompressibilityFeatures",
     "FixedBudget",
     "MergedTokens",
     "PrunedEncoder",
@@ -52,6 +58,8 @@ __all__ = [
     "calibrate_policy",
     "check_backbone",
     "clip_statistics",
+    "compressibility_features",
+    "fixed_anchors",
     "initial_sizes",
     "merge_error",
     "merge_tokens",
