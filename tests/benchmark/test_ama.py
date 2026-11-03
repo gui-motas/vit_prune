@@ -33,7 +33,9 @@ FILES = {
             return cfg
     """,
     # The evaluator reports, per tIoU, a tenth of the detections it was given plus a
-    # hundredth of the annotated videos of the split: enough to see what reached it.
+    # hundredth of the annotated videos of the split: enough to see what reached it. Like
+    # the real one, it still uses ``np.float``, an alias NumPy 1.24 removed, and its workers
+    # would be other processes.
     "libs/utils/__init__.py": """
         import json
 
@@ -43,13 +45,17 @@ FILES = {
             pass
 
         class ANETdetection:
-            def __init__(self, ant_file, split=None, tiou_thresholds=np.linspace(0.1, 0.5, 5)):
+            def __init__(self, ant_file, split=None, tiou_thresholds=np.linspace(0.1, 0.5, 5),
+                         num_workers=8):
+                if num_workers != 1:
+                    raise RuntimeError("workers in other processes would not see np.float")
                 database = json.load(open(ant_file))["database"]
                 self.videos = [k for k, v in database.items() if v["subset"] == split]
                 self.tiou_thresholds = tiou_thresholds
 
             def evaluate(self, preds, output_csv, verbose=True):
                 found = np.full(len(self.tiou_thresholds), len(preds) / 10 + len(self.videos) / 100)
+                found = found.astype(np.float)
                 return found, found.mean(), self.tiou_thresholds
     """,
     # One segment per video that reports what the model was given: the number of feature

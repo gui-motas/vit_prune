@@ -94,7 +94,11 @@ def score(labels: str, rows: list, destination: Path) -> None:
         import pandas as pd
         from libs.utils import ANETdetection
 
-        evaluator = ANETdetection(labels, split="validation", tiou_thresholds=np.array(TIOUS))
+        if not hasattr(np, "float"):
+            np.float = float  # the AMA's evaluator still uses this alias of the builtin float
+        # One worker keeps the evaluation in this process, where the alias exists.
+        evaluator = ANETdetection(labels, split="validation", tiou_thresholds=np.array(TIOUS),
+                                  num_workers=1)
         found, average, _ = evaluator.evaluate(pd.DataFrame(rows, columns=COLUMNS),
                                                str(destination / "evaluated.csv"), verbose=False)
         found, average = [float(value) for value in found], float(average)
