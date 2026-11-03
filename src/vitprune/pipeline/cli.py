@@ -5,6 +5,8 @@ Commands for integration, measurement and application:
 * ``cost`` -- count operations. No GPU, checkpoint or video needed.
 * ``check`` -- verify the dense encoder against the original forward.
 * ``calibrate`` -- fit the adaptive budget on calibration videos.
+* ``budget-curve`` -- how far each budget moves each clip's embedding from the dense one:
+  what the quality-aware budget is calibrated on.
 * ``region`` -- find the driver region with a person detector, on calibration videos.
 * ``latency`` -- time the adaptive budget against the dense path, on real clips.
 * ``drift`` -- measure how far the adaptive embedding moves. Needs video, no labels.
@@ -375,6 +377,48 @@ def _run_calibrate(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# budget-curve
+# ---------------------------------------------------------------------------
+def _run_budget_curve(args) -> int:
+    from vitprune.core.encoder import PrunedEncoder, PruningPlan
+    from vitprune.pipeline.quality import SUMMARY, collect_records
+
+    geometry = ClipGeometry.videomae_giant()
+    plan = PruningPlan(prune_layer=args.prune_layer, motion_weight=args.motion_weight)
+    backbone = _load_backbone(args)
+
+    print(RULE)
+    print(f"levels {args.levels} after block {args.prune_layer}, measured against the dense path")
+    print("videos used for calibration must not be evaluated")
+    print(RULE)
+
+    folder = collect_records(
+        PrunedEncoder(backbone, geometry, plan),
+        args.videos,
+        args.out,
+        args.levels,
+        clips_per_video=args.clips_per_video,
+        depths=args.depths,
+        stride=args.stride,
+        frame_step=args.frame_step,
+        batch=args.batch,
+        device=args.device,
+        precision=args.precision,
+        weights_path=args.weights,
+        head=getattr(backbone, "head", None),
+    )
+    summary = json.loads((folder / SUMMARY).read_text(encoding="utf-8"))
+    print(f"\n{summary['clips']} clips of {summary['videos']} videos, cosine to the dense path:")
+    for level, found in summary["levels"].items():
+        cos, top1 = found["cos"], found["top1"]
+        agreement = "" if top1 is None else f" | top-1 as dense {top1:.0%}"
+        print(f"  {level:>5} tokens: P10 {cos['p10']:.3f}, P50 {cos['p50']:.3f}, "
+              f"P90 {cos['p90']:.3f}{agreement}")
+    print(f"\nrecords in {folder}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # region
 # ---------------------------------------------------------------------------
 def _run_region(args) -> int:
@@ -664,6 +708,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="clips taken from each video, spread over it (default: every clip)",
     )
     calibrate.set_defaults(handler=_run_calibrate)
+
+    curve = commands.add_parser(
+        "budget-curve", help="per-clip drift of each budget against the dense path"
+    )
+    _add_model_arguments(curve)
+    _add_run_arguments(curve)
+    curve.set_defaults(precision="off")
+    curve.add_argument("--videos", required=True, nargs="+", help="video files or folders")
+    curve.add_argument("--out", required=True, help="records folder; resumed video by video")
+    curve.add_argument(
+        "--levels", type=int, nargs="+", default=[512, 1024, 1536, 2048],
+        help="tokens kept per clip; the full level is always measured (default: %(default)s)",
+    )
+    curve.add_argument(
+        "--depths", type=int, nargs="*", default=[],
+        help="blocks after which the drift of the token mean is also recorded",
+    )
+    curve.add_argument(
+        "--clips-per-video", type=int, default=48,
+        help="clips spread over each video (default: %(default)s)",
+    )
+    curve.add_argument("--prune-layer", type=int, default=2)
+    curve.add_argument("--motion-weight", type=float, default=0.5)
+    curve.set_defaults(handler=_run_budget_curve)
 
     region = commands.add_parser("region", help="find the driver region with a person detector")
     region.add_argument("--videos", required=True, help="calibration videos, not evaluated")
