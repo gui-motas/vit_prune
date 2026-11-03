@@ -26,3 +26,4 @@ def test_the_functional_loss_counts_only_what_the_pruned_head_lost():
     assert found["delta_p"] == pytest.approx([0.3, 0.0, 0.0])  # the second improved
     assert found["delta_ce"] == pytest.approx([math.log(0.7 / 0.4), 0.0, 0.0])
     assert found["flip"].tolist() == [True, False, False]  # right in dense, wrong pruned
+    assert found["margin"] == pytest.approx([-0.2, 0.8, 0.2])  # below zero: the pruned head errs

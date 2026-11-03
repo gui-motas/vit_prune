@@ -61,16 +61,20 @@ def clip_labels(starts: Sequence[float], span: float,
 
 def functional_losses(dense: np.ndarray, pruned: np.ndarray,
                       labels: Sequence[int]) -> dict[str, np.ndarray]:
-    """Per labelled clip: the probability the pruned head gives the true class, how far it fell
-    from the dense head's (``delta_p``, never negative), the rise of the cross-entropy
-    (``delta_ce``, never negative), and whether a right dense answer turned wrong."""
+    """Per labelled clip: the probability the pruned head gives the true class and its margin
+    over the next class, how far it fell from the dense head's (``delta_p``, never negative),
+    the rise of the cross-entropy (``delta_ce``, never negative), and whether a right dense
+    answer turned wrong."""
     labels = np.asarray(labels, dtype=int)
     rows = np.arange(len(labels))
     true_dense, true_pruned = dense[rows, labels], pruned[rows, labels]
+    others = pruned.copy()
+    others[rows, labels] = -np.inf
     tiny = 1e-12
     return {
         "p_true": true_pruned,
         "p_true_dense": true_dense,
+        "margin": true_pruned - others.max(axis=1),
         "delta_p": np.maximum(0.0, true_dense - true_pruned),
         "delta_ce": np.maximum(0.0, np.log(true_dense + tiny) - np.log(true_pruned + tiny)),
         "flip": (dense.argmax(axis=1) == labels) & (pruned.argmax(axis=1) != labels),
@@ -207,6 +211,9 @@ def _relate(clips: list[dict], permutations: int) -> dict:
         }
     found["probe_beyond_g"] = {
         loss: partial_spearman(column["probe_p90"], column[loss], column["g"]) for loss in LOSSES}
+    found["probe_beyond_motion_redundancy"] = {
+        loss: partial_spearman(column["probe_p90"], column[loss], column["motion"],
+                               column["redundancy"]) for loss in LOSSES}
     found["mean_delta_ce"] = float(column["delta_ce"].mean())
     return found
 

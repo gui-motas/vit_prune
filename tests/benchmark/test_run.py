@@ -285,6 +285,7 @@ def test_the_proxy_study_joins_the_cut_signals_with_what_the_head_lost(bench, mo
     assert set(variant["signals"]) == {"probe_p90", "probe_mean", "g", "motion", "redundancy",
                                        "drift"}
     assert variant["actions"] == {"annotated": 2, "found_dense": 2, "found": 1, "lost": 1}
+    assert set(variant["probe_beyond_motion_redundancy"]) == {"delta_ce", "delta_p"}
     with (bench.out / "proxy" / "clips.csv").open(encoding="utf-8") as stream:
         clips = list(csv.DictReader(stream))
     assert [float(c["start_s"]) for c in clips] == [0.0, 2.0, 4.0, 6.0]  # frames over 8 fps

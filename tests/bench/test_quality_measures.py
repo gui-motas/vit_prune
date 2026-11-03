@@ -90,3 +90,15 @@ def test_partial_spearman_removes_what_the_control_explains():
     assert abs(partial_spearman(x, y, control)) < 0.3
     extra = rng.random(200)
     assert partial_spearman(control + extra, control + extra, control) > 0.9
+
+
+def test_partial_spearman_takes_out_every_control():
+    from vitprune.bench.quality import partial_spearman
+
+    rng = np.random.default_rng(3)
+    first, second = rng.random(200), rng.random(200)
+    for shared, other in ((first, second), (second, first)):
+        x = shared + 0.01 * rng.random(200)
+        y = shared + 0.01 * rng.random(200)
+        assert partial_spearman(x, y, other) > 0.9  # the other control explains nothing
+        assert abs(partial_spearman(x, y, first, second)) < 0.3

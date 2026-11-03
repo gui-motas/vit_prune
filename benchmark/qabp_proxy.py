@@ -49,9 +49,11 @@ def main() -> int:
                   f"(p within videos {values['p_delta_ce_within_videos']:.3f}), "
                   f"with delta_p {values['rho_delta_p']:+.3f}, AUC of flips "
                   f"{values['auc_flip']:.3f}")
-        beyond = found.get("probe_beyond_g", {})
-        print(f"  probe beyond g: delta_ce {beyond.get('delta_ce', float('nan')):+.3f}, "
-              f"delta_p {beyond.get('delta_p', float('nan')):+.3f}")
+        for control in ("g", "motion_redundancy"):
+            beyond = found.get(f"probe_beyond_{control}", {})
+            print(f"  probe beyond {control}: "
+                  f"delta_ce {beyond.get('delta_ce', float('nan')):+.3f}, "
+                  f"delta_p {beyond.get('delta_p', float('nan')):+.3f}")
     print(f"\nwritten to {args.run}/proxy")
     return 0
 
