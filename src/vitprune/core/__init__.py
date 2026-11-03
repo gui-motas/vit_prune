@@ -36,12 +36,20 @@ from vitprune.core.merging import (
     merge_tokens,
     size_weighted_mean,
 )
-from vitprune.core.policy import BudgetPolicy, FixedBudget, calibrate_policy
+from vitprune.core.policy import (
+    BudgetDecision,
+    BudgetPolicy,
+    FixedBudget,
+    QualityAwareBudgetPolicy,
+    calibrate_policy,
+    calibrate_quality_aware,
+)
 from vitprune.core.priors import box_prior, top_rows_prior
 from vitprune.core.scoring import apply_prior, score_tokens
 from vitprune.core.statistics import ClipStatistics, clip_statistics
 
 __all__ = [
+    "BudgetDecision",
     "BudgetPolicy",
     "ClipBudget",
     "ClipGeometry",
@@ -53,10 +61,12 @@ __all__ = [
     "MergedTokens",
     "PrunedEncoder",
     "PruningPlan",
+    "QualityAwareBudgetPolicy",
     "TokenSelection",
     "apply_prior",
     "box_prior",
     "calibrate_policy",
+    "calibrate_quality_aware",
     "check_backbone",
     "clip_statistics",
     "compressibility_features",
