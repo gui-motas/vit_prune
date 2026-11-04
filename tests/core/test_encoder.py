@@ -218,3 +218,11 @@ def test_invalid_prior_is_rejected_at_construction(prior):
 def test_invalid_motion_weight_is_rejected_at_construction(weight):
     with pytest.raises(ValueError, match="motion_weight"):
         PruningPlan(motion_weight=weight)
+
+
+def test_motion_alone_is_refused_because_the_first_slice_has_none():
+    # The first slice has no earlier one: under motion alone all its tokens tie and would be
+    # kept by grid position, whatever the clip shows.
+    with pytest.raises(ValueError, match="motion_weight"):
+        PruningPlan(motion_weight=1.0)
+    assert PruningPlan(motion_weight=0.99).motion_weight == 0.99

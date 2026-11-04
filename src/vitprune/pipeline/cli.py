@@ -693,7 +693,8 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--motion-weight",
         type=float,
-        help="0 uses uniqueness only, 1 uses motion only (default: 0.5)",
+        help="0 uses uniqueness only; below 1, as motion alone scores no first slice "
+        "(default: 0.5)",
     )
     parser.add_argument(
         "--prior-top-rows",

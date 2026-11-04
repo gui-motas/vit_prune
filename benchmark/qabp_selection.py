@@ -6,7 +6,6 @@ dense and fixed variants, whose features are linked rather than recomputed:
 
 * ``mascara_K``: the driver region as a spatial prior, as the mask study applies it;
 * ``mascara_sem_carimbo_K``: the same, with the burned-in date and time left out as well;
-* ``so_movimento_K``: the score's motion term alone (``motion_weight`` 1), no prior;
 * ``aleatorio_K``: tokens kept at random, no prior: the floor any criterion has to beat.
 
 Writes a run folder that ``vitprune benchmark ama`` and ``benchmark report`` take; a
@@ -38,7 +37,7 @@ from vitprune.pipeline.video import find_videos, iter_clips
 
 #: The date and time burned into the AI City Dashboard footage, as fractions of the frame.
 TIMESTAMP = (0.62, 0.94, 0.92, 0.98)
-CRITERIA = ("mascara", "mascara_sem_carimbo", "so_movimento", "aleatorio")
+CRITERIA = ("mascara", "mascara_sem_carimbo", "aleatorio")
 LINKED = ("denso", "fixo_512", "fixo_1024")
 
 
@@ -65,8 +64,6 @@ def criteria(model, geometry: ClipGeometry, region: torch.Tensor, levels, cut: i
             model, geometry, PruningPlan(prune_layer=cut, budget=budget, spatial_prior=region))
         found[f"mascara_sem_carimbo_{k}"] = PrunedEncoder(
             model, geometry, PruningPlan(prune_layer=cut, budget=budget, spatial_prior=no_stamp))
-        found[f"so_movimento_{k}"] = PrunedEncoder(
-            model, geometry, PruningPlan(prune_layer=cut, budget=budget, motion_weight=1.0))
         found[f"aleatorio_{k}"] = RandomSelection(
             model, geometry, PruningPlan(prune_layer=cut, budget=budget))
     return found

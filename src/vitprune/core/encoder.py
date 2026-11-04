@@ -61,7 +61,8 @@ class PruningPlan:
         prune_layer: which block to prune after, counting from 1. Zero disables
             pruning entirely.
         motion_weight: weight of motion against uniqueness in the score that decides
-            which tokens survive.
+            which tokens survive, in [0, 1). Motion alone is refused: the first slice has no
+            earlier one, so its tokens would all tie and be kept by grid position.
         spatial_prior: per-position multiplier, or ``None``.
         size_biased_attention: enables the proportional attention described in
             :mod:`vitprune.core.attention`. Experimental.
@@ -84,9 +85,10 @@ class PruningPlan:
             isinstance(self.motion_weight, bool)
             or not isinstance(self.motion_weight, Real)
             or not isfinite(self.motion_weight)
-            or not 0.0 <= self.motion_weight <= 1.0
+            or not 0.0 <= self.motion_weight < 1.0
         ):
-            raise ValueError("motion_weight must be finite and in [0, 1]")
+            raise ValueError("motion_weight must be finite and in [0, 1): motion alone leaves "
+                             "the first slice without a score")
         if not isinstance(self.size_biased_attention, bool):
             raise ValueError("size_biased_attention must be a bool")
         if self.spatial_prior is not None:
