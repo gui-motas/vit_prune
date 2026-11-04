@@ -345,3 +345,26 @@ def test_a_masked_budget_is_named_for_its_mask():
     assert report.variant_name("fixo_768_mascara") == (
         "ViT-Prune fixo 768 tokens + máscara do motorista")
     assert report.short_label("fixo_768_mascara") == "Fixo 768 + máscara"
+
+
+def test_boundaries_and_confidence_are_compared_on_the_actions_both_runs_find(tmp_path):
+    pytest.importorskip("openpyxl")
+    out = _policy_run(tmp_path)
+    # the dense run finds both actions, the second 2 s early; the fixed budget finds only the
+    # first, 0.5 s late: over its own finds it would look closer than the dense run (0.5 < 1.0)
+    _d([["v", 0.0, 10.0, 1, .9], ["v", 2.0, 8.0, 2, .8]]).to_csv(
+        out / "ama" / "denso" / "predictions.csv", index=False)
+    _d([["v", 0.5, 10.0, 1, .7]]).to_csv(out / "ama" / "fixo_32" / "predictions.csv", index=False)
+
+    book = pd.ExcelFile(report.make_report(out))
+
+    fixed = book.parse("Resumo").set_index("Variante").loc[report.variant_name("fixo_32")]
+    assert fixed["Ações em comum com o denso"] == 1
+    assert fixed["Erro médio no início (s)"] == pytest.approx(0.5)
+    assert fixed["Denso nas mesmas ações: erro no início (s)"] == pytest.approx(0.0)
+    assert fixed["Confiança média das reencontradas"] == pytest.approx(0.7)
+    assert fixed["Denso nas mesmas ações: confiança"] == pytest.approx(0.9)
+    classes = book.parse("Por classe")
+    first = classes[(classes["Classe"] == "classe 1")
+                    & (classes["Variante"] == report.variant_name("fixo_32"))]
+    assert first["Denso nas mesmas ações: confiança"].tolist() == [pytest.approx(0.9)]

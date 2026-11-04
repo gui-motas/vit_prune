@@ -244,6 +244,17 @@ def matched_confidence(reference: pd.DataFrame, found: pd.DataFrame, tiou: float
     return float(found.loc[where[matched], "score"].mean()) if matched.any() else None
 
 
+def shared_actions(reference: pd.DataFrame, found: pd.DataFrame, dense: pd.DataFrame,
+                   tiou: float = TIOU, min_score: float = MIN_SCORE) -> pd.DataFrame:
+    """The reference actions that both ``found`` and ``dense`` find: the only ones on which
+    two runs' boundaries and confidence can be set side by side. Over each run's own finds, a
+    run that loses the hard actions would look closer."""
+    reference = reference[reference["score"] >= min_score].reset_index(drop=True)
+    mine = _best(reference, found[found["score"] >= min_score])[0]
+    theirs = _best(reference, dense[dense["score"] >= min_score])[0]
+    return reference[(mine >= tiou) & (theirs >= tiou)]
+
+
 def clip_accuracy(probabilities: np.ndarray, centres: np.ndarray,
                   actions: pd.DataFrame) -> tuple[int, int]:
     """Clips whose centre lies in an annotated action and whose top class is that action's,
@@ -329,14 +340,22 @@ def task_metrics(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
     row = {}
     if detections is not None:
         found = detections[variant][detections[variant]["video-id"].isin(stems)]
+        dense = detections["denso"][detections["denso"]["video-id"].isin(stems)]
         got = agreement(mine, found, tiou, min_score)
-        edges = boundary_errors(mine, found, tiou, min_score)
+        common = shared_actions(mine, found, dense, tiou, min_score)
+        edges = boundary_errors(common, found, tiou, min_score)
+        dense_edges = boundary_errors(common, dense, tiou, min_score)
         row |= {GT_RECALL: got["recall"], GT_PRECISION: got["precision"],
                 "Falsos positivos": false_positives(mine, found, tiou, min_score),
+                "Ações em comum com o denso": len(common),
                 "Erro médio no início (s)": edges["start"],
                 "Erro médio no fim (s)": edges["end"],
-                "Confiança média das reencontradas": matched_confidence(mine, found, tiou,
-                                                                        min_score)}
+                "Confiança média das reencontradas": matched_confidence(common, found, tiou,
+                                                                        min_score),
+                "Denso nas mesmas ações: erro no início (s)": dense_edges["start"],
+                "Denso nas mesmas ações: erro no fim (s)": dense_edges["end"],
+                "Denso nas mesmas ações: confiança": matched_confidence(common, dense, tiou,
+                                                                       min_score)}
     head = annotated(record, frame, probabilities, variant, mine, stems)
     return row | {"Acurácia de classe por clipe (anotações)": head["clip"],
                   "Acurácia de classe por ação (anotações)": head["action"]}
@@ -472,15 +491,15 @@ def per_class(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
             row = {"Classe": f"classe {label}", "Variante": variant_name(variant),
                    "Ações": len(group)}
             if detections is not None:
-                found = detections[variant]
-                found = found[found["score"] >= min_score].reset_index(drop=True)
-                best, where = _best(group, found)
-                matched = best >= tiou
-                row |= {"Reencontradas": int(matched.sum()),
+                found, dense = detections[variant], detections["denso"]
+                best = best_tiou(group, found[found["score"] >= min_score])
+                common = shared_actions(group, found, dense, tiou, min_score)
+                row |= {"Reencontradas": int((best >= tiou).sum()),
                         "tIoU médio do melhor par": float(best.mean()),
                         "Confiança média das reencontradas":
-                            float(found.loc[where[matched], "score"].mean())
-                            if matched.any() else None}
+                            matched_confidence(common, found, tiou, min_score),
+                        "Denso nas mesmas ações: confiança":
+                            matched_confidence(common, dense, tiou, min_score)}
             head = annotated(record, frame, probabilities, variant, group)
             row["Acurácia de classe por ação (anotações)"] = head["action"]
             table.append(row)
@@ -571,7 +590,9 @@ def configuration(record: RunRecord, policy: dict | None, region: dict, tiou: fl
             f"{len(actions)} ações anotadas nos vídeos avaliados (rótulos do AI City). O mAP "
             "vem do avaliador do próprio AMA; as ações reencontradas, a precisão, os falsos "
             f"positivos e as fronteiras usam as detecções com confiança de {min_score:g} para "
-            f"cima e tIoU de {tiou:g} ou mais, na mesma classe. Esses vídeos estão no subset "
+            f"cima e tIoU de {tiou:g} ou mais, na mesma classe. Fronteiras e confiança de uma "
+            "variante são medidas nas ações que ela e o denso encontram, e as colunas 'Denso "
+            "nas mesmas ações' dão o denso nesse mesmo conjunto. Esses vídeos estão no subset "
             "de treino do AMA, e o AMA viu recortes do motorista, não o quadro inteiro: os "
             "números medem o quanto cada variante preserva o desempenho do pipeline, não a "
             "generalização."))
