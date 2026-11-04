@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -31,8 +32,14 @@ import torch.nn.functional as F
 from vitprune.core import ClipGeometry, PrunedEncoder, PruningPlan
 from vitprune.core.policy import FixedBudget
 from vitprune.core.priors import box_prior
-from vitprune.pipeline.benchmark.inference import append_rows, keep_rows, save_npz
+from vitprune.pipeline.benchmark.inference import (
+    append_rows,
+    calibration_overlap,
+    keep_rows,
+    save_npz,
+)
 from vitprune.pipeline.checkpoint import disable_activation_checkpointing, load_videomae
+from vitprune.pipeline.provenance import SourceFile
 from vitprune.pipeline.region import read_region
 from vitprune.pipeline.video import find_videos, iter_clips
 
@@ -122,6 +129,16 @@ def main() -> int:
     geometry = ClipGeometry.videomae_giant()
     region = read_region(args.region, geometry)
     paths = {path.stem: path for path in find_videos(run["videos"])}
+    region_file = asdict(SourceFile.of(args.region))
+    if any(criterion.startswith("mascara") for criterion in args.criteria):
+        found = calibration_overlap(Path(args.region), {stem: SourceFile.of(paths[stem]).sha256})
+        if found["videos"] or found["drivers"]:
+            raise SystemExit(f"the region {args.region} was calibrated on the video under test "
+                             f"or its driver ({found}); take one of other drivers")
+    if (out / "run.json").exists():
+        before = json.loads((out / "run.json").read_text(encoding="utf-8")).get("region", {})
+        if before.get("sha256") != region_file["sha256"]:
+            raise SystemExit(f"{out} holds results of another region; choose another --out")
 
     model = disable_activation_checkpointing(
         load_videomae(args.weights, args.model_source, geometry, device=args.device))
@@ -138,7 +155,7 @@ def main() -> int:
                       else source / name)
             target.symlink_to(origin.resolve())
     dense = np.load(out / "features" / "denso" / f"{stem}.npz")["feats"]
-    record = {**run, "schedules": {stem: run["schedules"][stem]},
+    record = {**run, "region": region_file, "schedules": {stem: run["schedules"][stem]},
               "settings": {**settings, "variants": variants, "evaluate": [stem],
                            "fixed": [512, 1024], "proportional": []},
               "criterion_study": {"source": str(source), "region": args.region,

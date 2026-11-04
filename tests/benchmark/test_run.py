@@ -340,3 +340,31 @@ def test_a_crash_while_writing_the_rows_leaves_the_video_to_redo(bench, model, m
 
     clips = len(bench.clip_starts(FPS * SECONDS))
     assert sorted(r["variant"] for r in _rows(bench)) == ["denso"] * clips + ["fixo_32"] * clips
+
+
+def _region_from(bench, path, videos):
+    """The fixture's region, as if calibrated on ``videos``."""
+    region = json.loads(bench.region.read_text("utf-8"))
+    region["calibration"] = {"videos": videos}
+    path.write_text(json.dumps(region), encoding="utf-8")
+    return path
+
+
+def test_a_mask_drawn_from_an_evaluated_video_is_refused(bench, model, tmp_path):
+    # The {stem: box} form a region derived by hand from another one keeps.
+    bench.region = _region_from(bench, tmp_path / "leaky.json", {"v": [0.1, 0.2, 0.9, 1.0]})
+    bench.policy, bench.masked = None, (32,)
+
+    with pytest.raises(ValueError, match="region"):
+        inference.run_benchmark(bench)
+
+
+def test_the_overlap_of_a_mask_with_the_evaluated_videos_is_recorded(bench, model, tmp_path):
+    other = [{"source": {"path": "/x/other.mp4", "sha256": "abc"}}]
+    bench.region = _region_from(bench, tmp_path / "fair.json", other)
+    bench.policy, bench.masked = None, (32,)
+
+    inference.run_benchmark(bench)
+
+    overlap = json.loads(bench.record.read_text("utf-8"))["calibration_overlap"]
+    assert overlap["--region"] == {"videos": [], "drivers": []}

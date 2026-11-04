@@ -336,15 +336,20 @@ def refuse_other_runs(record_path: Path, settings: dict, policy: Path | None,
 
 
 def calibration_overlap(path: Path, evaluated: dict[str, str]) -> dict:
-    """The evaluated videos (``stem -> sha256``) and drivers a policy file was calibrated on."""
+    """The evaluated videos (``stem -> sha256``) and drivers a policy or region file was
+    calibrated on, matched by content or by name. Its videos are a list of entries, as the
+    calibrations write them, or ``{stem: box}``, as a region derived from another keeps them."""
     calibration = json.loads(Path(path).read_text(encoding="utf-8")).get("calibration", {})
-    hashes, drivers = set(), set()
-    for entry in calibration.get("videos", []):
+    videos = calibration.get("videos", [])
+    hashes, stems, drivers = set(), set(), set()
+    for entry in [{"stem": stem} for stem in videos] if isinstance(videos, dict) else videos:
         source = entry.get("source") or {}
+        stem = entry.get("stem") or Path(source.get("path", "")).stem
         hashes.add(source.get("sha256"))
-        drivers.add(entry.get("driver") or driver_of(entry.get("stem")
-                                                     or Path(source.get("path", "")).stem))
-    return {"videos": sorted(stem for stem, sha in evaluated.items() if sha in hashes),
+        stems.add(stem)
+        drivers.add(entry.get("driver") or driver_of(stem))
+    return {"videos": sorted(stem for stem, sha in evaluated.items()
+                             if sha in hashes or stem in stems),
             "drivers": sorted({driver_of(stem) for stem in evaluated} & drivers)}
 
 
@@ -357,20 +362,20 @@ def run_benchmark(bench: Benchmark) -> None:
                                   bench.precision) for name, path in files.items()}
     region = read_region(bench.region, GEOMETRY)
     videos = bench.evaluated()
-    overlap = {}
-    if bench.policy_study:
-        evaluated = {video.stem: SourceFile.of(video).sha256 for video in videos}
-        overlap = {name: calibration_overlap(path, evaluated) for name, path in files.items()}
-        tainted = {name: found for name, found in overlap.items()
-                   if isinstance(policies[name], QualityAwareBudgetPolicy)
-                   and (found["videos"] or found["drivers"])}
-        if tainted:
-            raise ValueError(f"quality-aware policies calibrated on an evaluated video or "
-                             f"driver: {tainted}; calibrate them on other drivers")
-        for name, found in overlap.items():
-            if found["videos"] or found["drivers"]:
-                print(f"warning: {name} was calibrated on evaluated videos {found['videos']} "
-                      f"or drivers {found['drivers']}", flush=True)
+    evaluated = {video.stem: SourceFile.of(video).sha256 for video in videos}
+    overlap = {name: calibration_overlap(path, evaluated) for name, path in files.items()}
+    if not bench.policy_study or bench.masked:  # then the region chooses which tokens stay
+        overlap["--region"] = calibration_overlap(bench.region, evaluated)
+    tainted = {name: found for name, found in overlap.items()
+               if (name == "--region" or isinstance(policies[name], QualityAwareBudgetPolicy))
+               and (found["videos"] or found["drivers"])}
+    if tainted:
+        raise ValueError(f"a quality-aware policy or the region calibrated on an evaluated "
+                         f"video or driver: {tainted}; calibrate it on other drivers")
+    for name, found in overlap.items():
+        if found["videos"] or found["drivers"]:
+            print(f"warning: {name} was calibrated on evaluated videos {found['videos']} "
+                  f"or drivers {found['drivers']}", flush=True)
     infos = {video.stem: video_info(video) for video in videos}
     schedules = {video.stem: plan(bench, video, infos[video.stem]) for video in videos}
     for video in videos:
@@ -402,10 +407,10 @@ def run_benchmark(bench: Benchmark) -> None:
             "settings": settings,
             "schedules": {stem: {**infos[stem], "clips": len(clips)}
                           for stem, clips in schedules.items()},
+            "calibration_overlap": overlap,
         }
         if bench.policy_study:
             record["policies"] = {name: asdict(SourceFile.of(path)) for name, path in files.items()}
-            record["calibration_overlap"] = overlap
             probed = [p for p in policies.values()
                       if isinstance(p, QualityAwareBudgetPolicy) and p.uses_probe]
             if probed:

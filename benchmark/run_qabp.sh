@@ -33,8 +33,11 @@ AMA=$M/AIcity2024-track3/AMA
 AMA_RUN=(--ama-project "$AMA" --ama-config "$AMA/configs/aicity_ego_vitl.yaml"
          --ama-weights "$M/AMA/ckpt/aicity_ego_vitl_ckpt/best_performance.pth.tar"
          --labels "$M/AIcity2024-track3/data/label_A1-train_A1-val.json")
-REGION=region-novo.json
+REGION=region-novo.json  # recorded by the policy studies, where it chooses no token
 OUT=benchmark/results/qabp
+# The driver mask of the fit drivers only, for any stage where the region chooses tokens:
+# region-novo.json was calibrated on every local video, the evaluated ones included.
+MASK=$OUT/regiao/regiao-ajuste.json
 # The P0 panel as it ran: the fit set before revision 3 took the selection set out of it.
 P0=(13522_NoAudio_7 28557_NoAudio_5 28557_NoAudio_7 30932_NoAudio_5 30932_NoAudio_7
     31903_NoAudio_5 31903_NoAudio_7 33682_NoAudio_5 33682_NoAudio_7)
@@ -106,7 +109,7 @@ proxy() {
 criterio() {  # which tokens or how many: other criteria at the same budget, first selection video
     for level in 512 1024; do
         "$PY" benchmark/qabp_selection.py --run "$OUT/selecao" --video \
-            "Dashboard_user_id_${SELECTION[0]}" --region "$REGION" --weights "$WEIGHTS" \
+            "Dashboard_user_id_${SELECTION[0]}" --region "$MASK" --weights "$WEIGHTS" \
             --model-source "$SOURCE" --levels "$level" --out "$OUT/criterio-$level"
         ama "criterio-$level"
     done
@@ -115,7 +118,7 @@ criterio() {  # which tokens or how many: other criteria at the same budget, fir
 confirmacao() {  # the driver mask of the fit videos (regiao/regiao-ajuste.json), on the rest of
     link confirmacao "${SELECTION[@]:1}"  # the selection set: the first one ran in criterio
     "${CLI[@]}" benchmark run "${MODEL[@]}" "${RUN[@]}" --videos "$OUT/videos/confirmacao" \
-        --region "$OUT/regiao/regiao-ajuste.json" --masked 1024 768 --out "$OUT/confirmacao"
+        --region "$MASK" --masked 1024 768 --out "$OUT/confirmacao"
     ama confirmacao
 }
 

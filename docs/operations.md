@@ -102,7 +102,8 @@ the reference, and each variant is compared with what the dense gave.
   inside the `--region` `fixo_TOKENS_mascara`, the one variant with a mask. `--policy`,
   optional here, adds `legacy_original`. The order the variants are timed in turns batch
   by batch. A quality-aware policy calibrated on an evaluated video or driver is refused;
-  a legacy one is only reported, in `run.json`.
+  a legacy one is only reported, in `run.json`. A `--region` calibrated on them is refused
+  too whenever it chooses tokens: with `--masked`, and in the mask study.
 - `benchmark ama` runs the AMA temporal localizer, the pipeline's next stage, on each
   variant's features. It does not use the AMA's `eval.py`, which compares detections with
   annotations: the model runs from `ama_infer.py`, a script started in the AMA's folder
