@@ -5,6 +5,8 @@
 #   bash benchmark/run_qabp.sh atencao      # the P0 panel again, with proportional attention
 #   bash benchmark/run_qabp.sh sanidade     # dense and 1536 through the AMA on one selection video
 #   bash benchmark/run_qabp.sh selecao      # the downstream validation on the selection videos
+#   bash benchmark/run_qabp.sh proxy        # phase B: signals at the cut against the head's loss
+#   bash benchmark/run_qabp.sh criterio     # the selection criterion at 512 and 1024 tokens
 #   bash benchmark/run_qabp.sh colecao      # the records of the calibration videos
 #   bash benchmark/run_qabp.sh legacy       # the legacy policy recalibrated on the fit videos
 #   bash benchmark/run_qabp.sh calibracao   # the QABP and its ablation without the probe; gate G3
@@ -90,6 +92,20 @@ selecao() {
     "${CLI[@]}" benchmark run "${MODEL[@]}" "${RUN[@]}" --videos "$OUT/videos/selecao" \
         --region "$REGION" --fixed 1536 1024 512 --proportional 1536 1024 --out "$OUT/selecao"
     ama selecao
+}
+
+proxy() {
+    "$PY" benchmark/qabp_proxy.py --run "$OUT/selecao" --weights "$WEIGHTS" \
+        --model-source "$SOURCE"
+}
+
+criterio() {  # which tokens or how many: other criteria at the same budget, first selection video
+    for level in 512 1024; do
+        "$PY" benchmark/qabp_selection.py --run "$OUT/selecao" --video \
+            "Dashboard_user_id_${SELECTION[0]}" --region "$REGION" --weights "$WEIGHTS" \
+            --model-source "$SOURCE" --levels "$level" --out "$OUT/criterio-$level"
+        ama "criterio-$level"
+    done
 }
 
 for stage in "$@"; do
