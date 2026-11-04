@@ -98,6 +98,22 @@ def test_an_interrupted_collection_resumes_video_by_video(encoder, videos, tmp_p
                                                            ("b", 32)]
 
 
+def test_a_video_whose_records_never_reached_the_sources_is_measured_again(encoder, videos,
+                                                                         tmp_path):
+    out = _collect(encoder, videos, tmp_path / "records")
+    # A crash between placing b's records and listing b among the sources leaves this.
+    sources = json.loads((out / quality.SOURCES).read_text("utf-8"))
+    del sources["b"]
+    (out / quality.SOURCES).write_text(json.dumps(sources), "utf-8")
+
+    _collect(encoder, videos, tmp_path / "records")
+
+    _, sources, records = read_records(out)
+    assert "b" in sources
+    assert [(r["video"], r["start"]) for r in records] == [("a", 0), ("a", 32), ("b", 0),
+                                                           ("b", 32)]
+
+
 def test_a_folder_of_other_settings_is_refused(encoder, videos, tmp_path):
     _collect(encoder, videos, tmp_path / "records", levels=[16, 32, 64])
     with pytest.raises(FileExistsError, match="other settings"):

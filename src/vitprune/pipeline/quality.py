@@ -158,7 +158,7 @@ def collect_records(
 
     for video in found:
         target = out / f"{video.stem}.jsonl"
-        if target.exists():
+        if target.exists() and video.stem in sources:  # listed last: anything less is redone
             progress(f"[budget-curve] {video.name}: done before")
             continue
         driver = driver_of(video.stem)
@@ -179,7 +179,9 @@ def collect_records(
         partial.replace(target)
         sources[video.stem] = {"source": asdict(SourceFile.of(video)), "driver": driver,
                                "clips": len(lines), "requested": clips_per_video}
-        (out / SOURCES).write_text(json.dumps(sources, indent=2), encoding="utf-8")
+        listed = out / f"{SOURCES}.partial"
+        listed.write_text(json.dumps(sources, indent=2), encoding="utf-8")
+        listed.replace(out / SOURCES)
         progress(f"[budget-curve] {video.name}: {len(lines)} clips")
 
     _, _, records = read_records(out)
