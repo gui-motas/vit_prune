@@ -95,10 +95,11 @@ the reference, and each variant is compared with what the dense gave.
   per video, spread over it, for the figures. A video is written whole or redone, so an
   interrupted run resumes with the same command; a folder holding another policy, region
   or setting is refused.
-- `benchmark run --policies NAME=PATH ... --fixed TOKENS ... --proportional TOKENS ...`
-  runs the policy study instead: the dense backbone and budgets, none with a mask. Each
+- `benchmark run --policies NAME=PATH ... --fixed TOKENS ... --proportional TOKENS ...
+  --masked TOKENS ...` runs the policy study instead: the dense backbone and budgets. Each
   policy file, legacy or quality-aware, becomes the variant `NAME`; each fixed budget the
-  variant `fixo_TOKENS`, and with size-biased attention `fixo_TOKENS_pa`. `--policy`,
+  variant `fixo_TOKENS`, with size-biased attention `fixo_TOKENS_pa`, and selecting only
+  inside the `--region` `fixo_TOKENS_mascara`, the one variant with a mask. `--policy`,
   optional here, adds `legacy_original`. The order the variants are timed in turns batch
   by batch. A quality-aware policy calibrated on an evaluated video or driver is refused;
   a legacy one is only reported, in `run.json`.

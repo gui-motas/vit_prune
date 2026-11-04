@@ -136,7 +136,7 @@ vitprune benchmark report --out outputs/benchmark
 `benchmark` needs no annotation: it runs the dense backbone and three ViT-Prune variants,
 then the AMA on each, and the report compares every variant with the dense run, which is
 the reference. That measures how much pruning changes the result, not whether it is right.
-`benchmark run --policies/--fixed/--proportional` compares budgets instead of masks, and
+`benchmark run --policies/--fixed/--proportional/--masked` compares budgets instead of masks, and
 `benchmark ama --labels` adds the AMA's mAP against annotations when there are any.
 
 `budget-curve` measures how far each budget moves each clip's embedding from the dense

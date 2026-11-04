@@ -534,11 +534,13 @@ def _run_benchmark_run(args) -> int:
         policies=tuple(policies),
         fixed=tuple(args.fixed or ()),
         proportional=tuple(args.proportional or ()),
+        masked=tuple(args.masked or ()),
     )
 
     print(RULE)
     if bench.policy_study:
-        print(f"the dense backbone and {len(bench.variants) - 1} budgets, no mask, on every clip")
+        masked = ", the _mascara ones inside the driver region" if bench.masked else ", no mask"
+        print(f"the dense backbone and {len(bench.variants) - 1} budgets{masked}, on every clip")
     else:
         print("the dense backbone and three ViT-Prune variants, on every clip")
     print("evaluated videos must not be among the calibration videos")
@@ -928,6 +930,10 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_run.add_argument(
         "--proportional", nargs="+", type=int, metavar="TOKENS",
         help="policy study: fixed budgets with size-biased attention, as variants fixo_TOKENS_pa",
+    )
+    bench_run.add_argument(
+        "--masked", nargs="+", type=int, metavar="TOKENS",
+        help="policy study: fixed budgets selecting inside the --region, as fixo_TOKENS_mascara",
     )
     bench_run.add_argument("--region", required=True, help="written by 'vitprune region'")
     _add_model_arguments(bench_run)

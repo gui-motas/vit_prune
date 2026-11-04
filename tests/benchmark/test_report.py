@@ -339,3 +339,9 @@ def test_the_task_is_also_reported_per_video_and_per_class(tmp_path):
     assert dense["Confiança média das reencontradas"].tolist() == [pytest.approx(0.8)]
     actions = book.parse("Por ação anotada")
     assert actions["Denso: confiança"].tolist() == [pytest.approx(0.9), pytest.approx(0.8)]
+
+
+def test_a_masked_budget_is_named_for_its_mask():
+    assert report.variant_name("fixo_768_mascara") == (
+        "ViT-Prune fixo 768 tokens + máscara do motorista")
+    assert report.short_label("fixo_768_mascara") == "Fixo 768 + máscara"

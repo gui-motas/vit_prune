@@ -1,8 +1,9 @@
 """Run the benchmark: every clip of the evaluated videos through every variant.
 
 The mask study runs the dense VideoMAE and three ViT-Prune variants under one policy. The
-policy study runs the dense VideoMAE and budgets without a mask -- policy files, fixed
-budgets and fixed budgets with size-biased attention -- turning the order in which they are
+policy study runs the dense VideoMAE and budgets -- policy files, fixed budgets, fixed
+budgets with size-biased attention and fixed budgets selecting inside the driver region, the
+only ones with a mask -- turning the order in which they are
 timed from batch to batch, so that none is always timed first. A quality-aware policy
 calibrated on an evaluated video or driver is refused; a legacy one is only reported.
 
@@ -114,6 +115,9 @@ def encoders(bench: Benchmark, model, policies: dict, region) -> dict[str, Prune
         plans |= {f"fixo_{k}_pa": PruningPlan(prune_layer=layer, budget=FixedBudget(k),
                                               size_biased_attention=True)
                   for k in bench.proportional}
+        plans |= {f"fixo_{k}_mascara": PruningPlan(prune_layer=layer, budget=FixedBudget(k),
+                                                   spatial_prior=region)
+                  for k in bench.masked}
     else:
         fixed = top_rows_prior(GEOMETRY.grid_size, bench.fixed_rows, bench.fixed_weight)
         priors = {"vitprune": None, "vitprune_mascara_fixa": fixed,
@@ -344,6 +348,8 @@ def run_benchmark(bench: Benchmark) -> None:
     if bench.policy_study:
         settings |= {"policies": {name: SourceFile.of(path).sha256 for name, path in files.items()},
                      "fixed": list(bench.fixed), "proportional": list(bench.proportional)}
+        if bench.masked:  # only when used, so the runs made before it still resume
+            settings["masked"] = list(bench.masked)
     refuse_other_runs(bench.record, settings, bench.policy, bench.region)
     model = load_model(bench)
     if not bench.record.exists():

@@ -37,10 +37,10 @@ class Benchmark:
 
     Two studies share the run. The mask study compares the dense VideoMAE with ViT-Prune
     without a mask, with the fixed mask and with the driver region, under ``policy``. The
-    policy study, chosen by giving ``policies``, ``fixed`` or ``proportional``, compares
-    budgets instead, all without a mask: the dense VideoMAE, ``policy`` when given (as
-    ``legacy_original``), each named policy file, and fixed budgets, with and without
-    size-biased attention.
+    policy study, chosen by giving ``policies``, ``fixed``, ``proportional`` or ``masked``,
+    compares budgets instead: the dense VideoMAE, ``policy`` when given (as
+    ``legacy_original``), each named policy file, and fixed budgets, plain, with size-biased
+    attention, or selecting inside the driver region. Only the last use a mask.
 
     Args:
         videos: folder of the videos under evaluation; never the calibration videos.
@@ -61,6 +61,8 @@ class Benchmark:
         fixed: tokens of each fixed-budget variant, ``fixo_<tokens>``.
         proportional: tokens of each fixed-budget variant with size-biased attention,
             ``fixo_<tokens>_pa``.
+        masked: tokens of each fixed-budget variant whose selection takes the driver
+            ``region`` as its spatial prior, ``fixo_<tokens>_mascara``.
     """
 
     videos: Path
@@ -83,6 +85,7 @@ class Benchmark:
     policies: tuple[tuple[str, Path], ...] = ()
     fixed: tuple[int, ...] = ()
     proportional: tuple[int, ...] = ()
+    masked: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("videos", "out", "region", "weights", "model_source"):
@@ -91,6 +94,7 @@ class Benchmark:
         self.evaluate = tuple(self.evaluate)
         self.policies = tuple((str(name), Path(path)) for name, path in self.policies)
         self.fixed, self.proportional = tuple(self.fixed), tuple(self.proportional)
+        self.masked = tuple(self.masked)
         names = [name for name, _ in self.policies]
         for name in names:
             fixed = name.startswith("fixo_")
@@ -99,7 +103,7 @@ class Benchmark:
                                  f"{RESERVED} nor fixo_*: got {name!r}")
         if len(set(names)) != len(names):
             raise ValueError(f"policy variant names must be unique, got {names}")
-        for levels in (self.fixed, self.proportional):
+        for levels in (self.fixed, self.proportional, self.masked):
             if len(set(levels)) != len(levels):
                 raise ValueError(f"fixed budgets must be unique, got {levels}")
             for tokens in levels:
@@ -115,8 +119,8 @@ class Benchmark:
 
     @property
     def policy_study(self) -> bool:
-        """Budgets compared without a mask, rather than masks under one policy."""
-        return bool(self.policies or self.fixed or self.proportional)
+        """Budgets compared with one another, rather than masks under one policy."""
+        return bool(self.policies or self.fixed or self.proportional or self.masked)
 
     @property
     def variants(self) -> tuple[str, ...]:
@@ -124,7 +128,8 @@ class Benchmark:
             return VARIANTS
         return ("denso", *(("legacy_original",) if self.policy is not None else ()),
                 *(name for name, _ in self.policies), *(f"fixo_{k}" for k in self.fixed),
-                *(f"fixo_{k}_pa" for k in self.proportional))
+                *(f"fixo_{k}_pa" for k in self.proportional),
+                *(f"fixo_{k}_mascara" for k in self.masked))
 
     @property
     def span(self) -> int:

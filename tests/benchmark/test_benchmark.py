@@ -231,3 +231,27 @@ def test_proportional_attention_comes_from_its_flag(tmp_path, monkeypatch):
     assert main(command) == 0
     assert seen[0].policy is None and seen[0].proportional == (1536, 1024)
     assert seen[0].variants == ("denso", "fixo_1024", "fixo_1536_pa", "fixo_1024_pa")
+
+
+def test_the_policy_study_adds_budgets_masked_by_the_driver_region(tmp_path):
+    study = _benchmark(tmp_path, policy=None, masked=(1024, 768))
+    assert study.policy_study
+    assert study.variants == ("denso", "fixo_1024_mascara", "fixo_768_mascara")
+    with pytest.raises(ValueError):
+        _benchmark(tmp_path, policy=None, masked=(1024, 1024))
+    with pytest.raises(ValueError):
+        _benchmark(tmp_path, policy=None, masked=(1001,))  # not a multiple of the slices
+
+
+def test_masked_budgets_come_from_their_flag(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")
+    from vitprune.pipeline.benchmark import inference
+
+    seen = []
+    monkeypatch.setattr(inference, "run_benchmark", seen.append)
+    command = ["benchmark", "run", "--videos", str(tmp_path), "--region", "r.json",
+               "--weights", "w.pth", "--model-source", "src", "--masked", "1024", "768"]
+
+    assert main(command) == 0
+    assert seen[0].policy is None and seen[0].masked == (1024, 768)
+    assert seen[0].variants == ("denso", "fixo_1024_mascara", "fixo_768_mascara")

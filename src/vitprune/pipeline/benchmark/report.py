@@ -65,17 +65,19 @@ SHORT = {
 }
 
 
-def _fixed(variant: str) -> tuple[int, bool] | None:
-    """The tokens of a fixed-budget variant, and whether it uses size-biased attention."""
-    found = re.fullmatch(r"fixo_(\d+)(_pa)?", variant)
-    return (int(found.group(1)), bool(found.group(2))) if found else None
+def _fixed(variant: str) -> tuple[int, str] | None:
+    """The tokens of a fixed-budget variant and what it adds: ``pa`` (size-biased attention),
+    ``mascara`` (the driver region) or nothing."""
+    found = re.fullmatch(r"fixo_(\d+)(?:_(pa|mascara))?", variant)
+    return (int(found.group(1)), found.group(2) or "") if found else None
 
 
 def variant_name(variant: str) -> str:
     """A variant's name in the tables."""
     fixed = _fixed(variant)
     if fixed:
-        return f"ViT-Prune fixo {fixed[0]} tokens" + (" + atenção proporcional" * fixed[1])
+        extra = {"pa": " + atenção proporcional", "mascara": " + máscara do motorista"}
+        return f"ViT-Prune fixo {fixed[0]} tokens" + extra.get(fixed[1], "")
     return NAMES.get(variant, variant)
 
 
@@ -85,7 +87,7 @@ def short_label(variant: str) -> str:
         return "Denso (referência)"
     fixed = _fixed(variant)
     if fixed:
-        return f"Fixo {fixed[0]}" + (" + AP" * fixed[1])
+        return f"Fixo {fixed[0]}" + {"pa": " + AP", "mascara": " + máscara"}.get(fixed[1], "")
     return SHORT.get(variant, variant)
 
 
@@ -389,7 +391,7 @@ def summary(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
         if "reason" in rows and rows["reason"].notna().any():
             row[FALLBACK] = rows["reason"].isin(FALLBACKS).mean()
         fixed = _fixed(variant)
-        if fixed and fixed[1] and f"fixo_{fixed[0]}" in record.variants:
+        if fixed and fixed[1] == "pa" and f"fixo_{fixed[0]}" in record.variants:
             base = frame[frame["variant"] == f"fixo_{fixed[0]}"]["seconds"].mean()
             row[PA_COST] = rows["seconds"].mean() / base - 1
         table.append(row)
@@ -587,8 +589,12 @@ def configuration(record: RunRecord, policy: dict | None, region: dict, tiou: fl
                                  "region, em vídeos que não são avaliados aqui."),
         ]
     else:
+        masked = any(variant.endswith("_mascara") for variant in record.variants)
         items += [
-            ("Nota: variantes", "Nenhuma variante usa máscara. 'Fixo N' mantém N tokens em todo "
+            ("Nota: variantes", ("'+ máscara do motorista' só mantém tokens dentro da região do "
+                                 "motorista da rodada; as demais variantes não usam máscara. "
+                                 if masked else "Nenhuma variante usa máscara. ")
+                                + "'Fixo N' mantém N tokens em todo "
                                 "clipe; '+ atenção proporcional' é o mesmo orçamento com "
                                 "size_biased_attention, e seu custo extra está na coluna "
                                 f"'{PA_COST}'."),

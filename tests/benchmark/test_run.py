@@ -213,6 +213,7 @@ def test_the_policy_study_runs_its_variants(bench, model, tmp_path):
         if row["variant"] == "denso":
             assert row["rel_l2_to_dense"] == pytest.approx(0.0, abs=1e-6)
     record = json.loads(bench.record.read_text("utf-8"))
+    assert "masked" not in record["settings"]  # so the runs made before it still resume
     assert record["settings"]["variants"] == list(variants)
     assert set(record["policies"]) == {"legacy_original", "qabp"}
     assert record["probe_timing"]["probe_ms_per_clip"] > 0
@@ -293,3 +294,17 @@ def test_the_proxy_study_joins_the_cut_signals_with_what_the_head_lost(bench, mo
         actions = list(csv.DictReader(stream))
     assert [(a["label"], a["clips"], a["found"]) for a in actions] == [
         ("1", "2", "True"), ("2", "2", "False")]
+
+
+def test_a_masked_budget_keeps_its_tokens_inside_the_driver_region(bench, model, geometry):
+    from vitprune.pipeline.region import read_region
+
+    bench.policy, bench.masked = None, (32,)
+    inference.run_benchmark(bench)
+
+    assert {r["variant"] for r in _rows(bench)} == {"denso", "fixo_32_mascara"}
+    assert json.loads(bench.record.read_text("utf-8"))["settings"]["masked"] == [32]
+    region = read_region(bench.region, geometry)
+    encoder = inference.encoders(bench, model, {}, region)["fixo_32_mascara"]
+    kept = encoder.select(torch.randn(*geometry.input_shape(batch=2))).kept
+    assert region[kept].all()  # 8 a slice, all among the 12 positions of the region
