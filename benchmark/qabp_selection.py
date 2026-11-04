@@ -113,6 +113,7 @@ def main() -> int:
     parser.add_argument("--model-source", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--levels", type=int, nargs="+", default=[512, 1024])
+    parser.add_argument("--criteria", nargs="+", choices=CRITERIA, default=list(CRITERIA))
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
 
@@ -126,7 +127,9 @@ def main() -> int:
 
     model = disable_activation_checkpointing(
         load_videomae(args.weights, args.model_source, geometry, device=args.device))
-    encoders = criteria(model, geometry, region, args.levels, settings["prune_layer"])
+    encoders = {name: encoder for name, encoder in
+                criteria(model, geometry, region, args.levels, settings["prune_layer"]).items()
+                if name.rsplit("_", 1)[0] in args.criteria}
     variants = [*LINKED, *encoders]
 
     for name in (*LINKED, "frames", "selection"):
