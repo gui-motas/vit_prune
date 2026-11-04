@@ -33,7 +33,9 @@ A video is written whole or redone, so an interrupted run resumes video by video
 from __future__ import annotations
 
 import json
+import os
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 
@@ -206,26 +208,59 @@ def evaluate_batch(bench: Benchmark, model, clips: list[dict], tensor: torch.Ten
     return rows, outputs
 
 
-def _append(bench: Benchmark, rows: list[dict]) -> None:
-    with bench.clips.open("a", encoding="utf-8") as stream:
+def append_rows(path: Path, rows: list[dict]) -> None:
+    """Append JSON lines and make sure they are on disk before anything is written after."""
+    with path.open("a", encoding="utf-8") as stream:
         for row in rows:
             stream.write(json.dumps(row) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def save_npz(path: Path, **arrays) -> None:
+    """Write an ``.npz`` whole or not at all: a write cut short leaves no file under the name
+    a resume takes for done."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".partial")
+    with partial.open("wb") as stream:
+        np.savez(stream, **arrays)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(partial, path)
+
+
+def keep_rows(path: Path, keep: Callable[[dict], bool]) -> None:
+    """Rewrite a JSON-lines file without the rows ``keep`` refuses and without a row an
+    interruption cut short, which is the only one that can lack its newline."""
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    kept = [line for line in lines if line.endswith("\n") and keep(json.loads(line))]
+    if len(kept) != len(lines):
+        partial = path.with_name(path.name + ".partial")
+        partial.write_text("".join(kept), encoding="utf-8")
+        os.replace(partial, path)
 
 
 def run(bench: Benchmark, model, videos: list[Path], schedules: dict,
         runners: dict, region: torch.Tensor) -> None:
-    """Every clip of every video, in batches; a video is written whole or redone."""
+    """Every clip of every video, in batches. A video's rows are written before its features
+    and each feature file whole, so a video is done once all its features exist; the rows
+    an interruption left of any other video are dropped and the video is redone."""
+    targets = {video.stem: {name: bench.features / name / f"{video.stem}.npz" for name in runners}
+               for video in videos}
+    unfinished = {stem for stem, paths in targets.items()
+                  if not all(path.exists() for path in paths.values())}
+    keep_rows(bench.clips, lambda row: row["video"] not in unfinished)
     for video in videos:
-        targets = {name: bench.features / name / f"{video.stem}.npz" for name in runners}
-        if all(path.exists() for path in targets.values()):
+        if video.stem not in unfinished:
             print(f"{video.stem}: already done", flush=True)
             continue
         rows, outputs = run_video(bench, model, video, schedules[video.stem], runners, region)
+        append_rows(bench.clips, rows)
         for name, (embeddings, probabilities) in outputs.items():
-            targets[name].parent.mkdir(parents=True, exist_ok=True)
-            np.savez(targets[name], feats=np.concatenate(embeddings),
+            save_npz(targets[video.stem][name], feats=np.concatenate(embeddings),
                      a_prob=np.concatenate(probabilities))
-        _append(bench, rows)
 
 
 def run_video(bench: Benchmark, model, video: Path, clips: list[dict],

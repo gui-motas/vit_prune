@@ -308,3 +308,35 @@ def test_a_masked_budget_keeps_its_tokens_inside_the_driver_region(bench, model,
     encoder = inference.encoders(bench, model, {}, region)["fixo_32_mascara"]
     kept = encoder.select(torch.randn(*geometry.input_shape(batch=2))).kept
     assert region[kept].all()  # 8 a slice, all among the 12 positions of the region
+
+
+def test_a_video_an_interruption_cut_is_redone_without_duplicate_rows(bench, model):
+    bench.policy, bench.fixed = None, (32,)
+    inference.run_benchmark(bench)
+    complete = sorted((r["variant"], r["start_frame"]) for r in _rows(bench))
+    # What a crash leaves behind: a variant's features missing, the last row cut mid-line.
+    (bench.features / "fixo_32" / "v.npz").unlink()
+    with bench.clips.open("a", encoding="utf-8") as stream:
+        stream.write('{"video": "v", "start_fr')
+
+    inference.run_benchmark(bench)
+
+    assert sorted((r["variant"], r["start_frame"]) for r in _rows(bench)) == complete
+    assert (bench.features / "fixo_32" / "v.npz").exists()
+
+
+def test_a_crash_while_writing_the_rows_leaves_the_video_to_redo(bench, model, monkeypatch):
+    bench.policy, bench.fixed = None, (32,)
+    write = inference.append_rows
+
+    def power_cut(path, rows):
+        raise OSError("power cut")
+
+    monkeypatch.setattr(inference, "append_rows", power_cut)
+    with pytest.raises(OSError):
+        inference.run_benchmark(bench)
+    monkeypatch.setattr(inference, "append_rows", write)
+    inference.run_benchmark(bench)
+
+    clips = len(bench.clip_starts(FPS * SECONDS))
+    assert sorted(r["variant"] for r in _rows(bench)) == ["denso"] * clips + ["fixo_32"] * clips

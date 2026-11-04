@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from vitprune.core import ClipGeometry, PrunedEncoder, PruningPlan
 from vitprune.core.policy import FixedBudget
 from vitprune.core.priors import box_prior
+from vitprune.pipeline.benchmark.inference import append_rows, keep_rows, save_npz
 from vitprune.pipeline.checkpoint import disable_activation_checkpointing, load_videomae
 from vitprune.pipeline.region import read_region
 from vitprune.pipeline.video import find_videos, iter_clips
@@ -143,12 +144,14 @@ def main() -> int:
               "criterion_study": {"source": str(source), "region": args.region,
                                   "timestamp": TIMESTAMP, "random_seed": 0}}
     (out / "run.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    # A variant's rows go before its features: rows without them are what an interruption
+    # left. The linked variants' rows are copied afresh each time, so a cut copy heals too.
     rows = out / "clips.jsonl"
-    if not rows.exists():
-        with (source / "clips.jsonl").open(encoding="utf-8") as stream:
-            rows.write_text("".join(line for line in stream if json.loads(line)["video"] == stem
-                                    and json.loads(line)["variant"] in LINKED),
-                            encoding="utf-8")
+    pending = {name for name in encoders if not (out / "features" / name / f"{stem}.npz").exists()}
+    keep_rows(rows, lambda row: row["variant"] not in pending | set(LINKED))
+    with (source / "clips.jsonl").open(encoding="utf-8") as stream:
+        append_rows(rows, [row for row in map(json.loads, stream)
+                           if row["video"] == stem and row["variant"] in LINKED])
     fps = run["schedules"][stem]["fps"]
 
     for name, encoder in encoders.items():
@@ -165,16 +168,13 @@ def main() -> int:
         cosines = F.cosine_similarity(mine, reference, dim=-1).tolist()
         relative = ((mine - reference).norm(dim=-1) / reference.norm(dim=-1)).tolist()
         tokens = encoder.plan.budget.tokens
-        target.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(target, feats=feats, a_prob=probs)
-        with rows.open("a", encoding="utf-8") as stream:
-            for i, start in enumerate(starts):
-                stream.write(json.dumps({
-                    "video": stem, "start_frame": start, "start_s": round(start / fps, 3),
-                    "variant": name, "tokens": tokens, "regime": 0, "inside_region": None,
-                    "cosine_to_dense": cosines[i], "rel_l2_to_dense": relative[i],
-                    "predicted_risk": None, "reason": None, "seconds": round(seconds[i], 4),
-                }) + "\n")
+        append_rows(rows, [{
+            "video": stem, "start_frame": start, "start_s": round(start / fps, 3),
+            "variant": name, "tokens": tokens, "regime": 0, "inside_region": None,
+            "cosine_to_dense": cosines[i], "rel_l2_to_dense": relative[i],
+            "predicted_risk": None, "reason": None, "seconds": round(seconds[i], 4),
+        } for i, start in enumerate(starts)])
+        save_npz(target, feats=feats, a_prob=probs)
         print(f"{name}: {len(feats)} clips in {time.time() - began:.0f}s, cosine P50 with the "
               f"dense {np.median(cosines):.3f}", flush=True)
     return 0
