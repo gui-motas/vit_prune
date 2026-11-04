@@ -7,6 +7,7 @@
 #   bash benchmark/run_qabp.sh selecao      # the downstream validation on the selection videos
 #   bash benchmark/run_qabp.sh proxy        # phase B: signals at the cut against the head's loss
 #   bash benchmark/run_qabp.sh criterio     # the selection criterion at 512 and 1024 tokens
+#   bash benchmark/run_qabp.sh confirmacao  # the fair driver mask at 1024 and 768, other selection videos
 #   bash benchmark/run_qabp.sh colecao      # the records of the calibration videos
 #   bash benchmark/run_qabp.sh legacy       # the legacy policy recalibrated on the fit videos
 #   bash benchmark/run_qabp.sh calibracao   # the QABP and its ablation without the probe; gate G3
@@ -106,6 +107,13 @@ criterio() {  # which tokens or how many: other criteria at the same budget, fir
             --model-source "$SOURCE" --levels "$level" --out "$OUT/criterio-$level"
         ama "criterio-$level"
     done
+}
+
+confirmacao() {  # the driver mask of the fit videos (regiao/regiao-ajuste.json), on the rest of
+    link confirmacao "${SELECTION[@]:1}"  # the selection set: the first one ran in criterio
+    "${CLI[@]}" benchmark run "${MODEL[@]}" "${RUN[@]}" --videos "$OUT/videos/confirmacao" \
+        --region "$OUT/regiao/regiao-ajuste.json" --masked 1024 768 --out "$OUT/confirmacao"
+    ama confirmacao
 }
 
 for stage in "$@"; do
