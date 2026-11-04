@@ -60,8 +60,11 @@ videos() {
     link holdout "${HOLDOUT[@]}"
 }
 
-ama() {  # ama RUN: the AMA and its mAP against the annotations, then the report
-    [ -f "$OUT/$1/ama/denso/map.json" ] || "${CLI[@]}" benchmark ama --out "$OUT/$1" "${AMA_RUN[@]}"
+ama() {  # ama RUN: the AMA and its mAP against the annotations, then the report. The manifest
+    # is written once the AMA has finished every variant: an AMA cut short is run again, and
+    # refuses loudly to overwrite what it left, rather than leaving a report without it.
+    [ -f "$OUT/$1/ama/denso/ama-manifest.json" ] ||
+        "${CLI[@]}" benchmark ama --out "$OUT/$1" "${AMA_RUN[@]}"
     "${CLI[@]}" benchmark report --out "$OUT/$1"
 }
 

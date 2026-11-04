@@ -368,3 +368,14 @@ def test_boundaries_and_confidence_are_compared_on_the_actions_both_runs_find(tm
     first = classes[(classes["Classe"] == "classe 1")
                     & (classes["Variante"] == report.variant_name("fixo_32"))]
     assert first["Denso nas mesmas ações: confiança"].tolist() == [pytest.approx(0.9)]
+
+
+def test_the_report_names_the_variants_the_ama_left_without_output(tmp_path, capsys):
+    pytest.importorskip("openpyxl")
+    out = _policy_run(tmp_path)
+    (out / "ama" / "fixo_32" / "predictions.csv").unlink()  # an AMA step cut short
+
+    report.make_report(out)
+
+    said = [line for line in capsys.readouterr().out.splitlines() if "AMA" in line]
+    assert any("fixo_32" in line for line in said)

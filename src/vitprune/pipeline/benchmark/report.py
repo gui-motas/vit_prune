@@ -136,11 +136,21 @@ def recorded(record: RunRecord) -> tuple[dict | None, dict]:
     return policy, region
 
 
+def _every(paths: dict[str, Path], what: str) -> bool:
+    """Whether every variant has its AMA output; saying so when only some have, which is what
+    an AMA step cut short leaves, so a workbook without the task metrics does not look whole."""
+    missing = [variant for variant, path in paths.items() if not path.exists()]
+    if missing and len(missing) < len(paths):
+        print(f"warning: no AMA {what} for {missing}; the report leaves the AMA's {what} out "
+              "for every variant", flush=True)
+    return not missing
+
+
 def ama_detections(record: RunRecord) -> dict[str, pd.DataFrame] | None:
     """The AMA's detections per variant, in seconds, when ``vitprune benchmark ama`` has run."""
     paths = {variant: record.out / "ama" / variant / "predictions.csv"
              for variant in record.variants}
-    if not all(path.exists() for path in paths.values()):
+    if not _every(paths, "detections"):
         return None
     return {variant: pd.read_csv(path) for variant, path in paths.items()}
 
@@ -161,7 +171,7 @@ def ground_truth(record: RunRecord) -> pd.DataFrame | None:
 def ama_scores(record: RunRecord) -> dict[str, dict] | None:
     """The AMA's mAP against the annotations per variant, when it was computed."""
     paths = {variant: record.out / "ama" / variant / "map.json" for variant in record.variants}
-    if not all(path.exists() for path in paths.values()):
+    if not _every(paths, "mAP"):
         return None
     return {variant: json.loads(path.read_text("utf-8")) for variant, path in paths.items()}
 
