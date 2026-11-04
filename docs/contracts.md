@@ -53,7 +53,8 @@ gives a clip's own count.
 - Geometry counts must be positive integers; divisibility rules are checked.
 - `prune_layer` is an integer from `0` to the actual depth; `0` disables pruning, and
   a budget with `prune_layer` 0 is rejected.
-- `motion_weight` is in `[0,1]`; NaN/Inf are rejected.
+- `motion_weight` is in `[0,1)`; NaN/Inf are rejected. Motion alone (`1`) is rejected:
+  the first slice has no earlier one, so its tokens would all tie and be kept in grid order.
 - Prior: one-dimensional finite non-negative tensor with `tokens_per_slice` values. A
   zero weight ranks the position after every weighted one, still in order of its own
   score; its score comes out negative.

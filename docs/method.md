@@ -66,7 +66,8 @@ has to do reasonably well on both, which rules out what is merely unusual but st
 and what merely flickers without being relevant.
 
 The weight is written as η in the literature and `motion_weight` here; 0.5 balances
-the two.
+the two. It stays below 1: the first slice has no motion, so under motion alone its tokens
+would tie and be kept in grid order, whatever the clip shows.
 
 Both scores are normalised to a common range before combining, because uniqueness is
 a cosine between -1 and 1 while motion is an unbounded distance. Normalisation is per

@@ -60,8 +60,8 @@ compressibility), and per level `1 - cos`, the relative L2 distance, the norms, 
 classification head gives the dense class, the merge's error per token and, after each
 block in `--depths`, the drift of the mean of the tokens. It is offline work, for
 calibration and diagnosis: inference never runs a clip twice. `--size-biased-attention`
-measures with proportional attention. The records folder resumes video by video and is
-refused under other settings. The driver of a video is the number after `user_id_` in its
+measures with proportional attention. The records folder resumes video by video, a video
+counting as done once `sources.json` lists it, and is refused under other settings. The driver of a video is the number after `user_id_` in its
 name, or the name itself.
 
 `calibrate-quality` fits the quality-aware budget on those records, without a GPU: the
@@ -92,9 +92,10 @@ the reference, and each variant is compared with what the dense gave.
   `--prune-layer`, `--frame-step` or the checkpoint differ from the ones it was calibrated
   with; use the same `--stride` and `--precision` too, which are not checked.
   `--fixed-rows` and `--fixed-weight` shape the fixed mask, and `--show N` keeps N clips
-  per video, spread over it, for the figures. A video is written whole or redone, so an
-  interrupted run resumes with the same command; a folder holding another policy, region
-  or setting is refused.
+  per video, spread over it, for the figures. A video's rows are written before its features
+  and each feature file whole, so an interrupted run resumes with the same command: a video
+  without all its features is redone, its leftover rows dropped first. A folder holding
+  another policy, region or setting is refused.
 - `benchmark run --policies NAME=PATH ... --fixed TOKENS ... --proportional TOKENS ...
   --masked TOKENS ...` runs the policy study instead: the dense backbone and budgets. Each
   policy file, legacy or quality-aware, becomes the variant `NAME`; each fixed budget the
@@ -123,8 +124,11 @@ the reference, and each variant is compared with what the dense gave.
   changes the dense result, not whether that result is right: where the dense is wrong, a
   variant that is wrong the same way agrees. With the annotations, it also gives the mAP,
   the annotated actions each variant finds and the share of its detections they confirm,
-  its false positives, the error of the boundaries it finds, and the head's class against
-  each annotated clip and action. The cosine and relative L2 distance to the dense
+  its false positives, the error of its boundaries and the confidence of its detections,
+  and the head's class against each annotated clip and action. Boundaries and confidence
+  are measured on the actions the variant and the dense run both find, with the dense
+  run's own on those same actions beside them: over each run's own finds, a variant that
+  loses the hard actions would look closer than the dense run. The cosine and relative L2 distance to the dense
   embedding, and the measured time per clip, sit beside them as auxiliary measures.
 
 `benchmark ama` and `benchmark report` take the evaluated videos and the sampling from
