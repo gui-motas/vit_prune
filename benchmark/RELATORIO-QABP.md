@@ -142,7 +142,8 @@ medido.
 
 - **Conjunto de seleção:** motoristas 28557 e 30932 (4 vídeos), separados do ajuste da QABP
   (13522, 31903, 33682), do holdout (35418, 36305) e da avaliação final (38159, 38479).
-- **Condições:** as mesmas do P0 (FP32, batch 8, corte após o bloco 2, sem prior).
+- **Condições:** as mesmas do P0 (FP32, batch 8, corte após o bloco 2). Sem prior, exceto
+  onde a seção diz que usa a máscara do motorista.
 - **Anotações:** `label_A1-train_A1-val.json`.
 - **Ressalva:** os 16 vídeos locais estão no subset de **treino** do AMA, e o AMA foi
   treinado com recortes do motorista. O mAP mede o quanto cada variante preserva o
@@ -174,7 +175,7 @@ abaixo de 0,05; não ficou.
 | mAP@0,1 a @0,5 e médio | 1,00 | 1,00 |
 | Ações reencontradas (tIoU ≥ 0,5, confiança ≥ 0,3) | 16/16 | 15/16 |
 | Precisão contra as anotações / falsos positivos | 0,89 / 2 | 0,88 / 2 |
-| Erro médio da fronteira, início / fim (s) | 0,57 / 1,22 | 0,70 / 1,09 |
+| Erro médio da fronteira, início / fim (s) | 0,57 / 1,22 | 0,70 / 1,09 (denso nas mesmas 15 ações: 0,57 / 1,26) |
 | Classe da cabeça igual à anotada, por clipe / por ação | 82% / 88% | 82% / 88% |
 | Classe da cabeça igual à do denso, por clipe | 100% | 64% |
 | Cosseno com o denso, P10 / P50 | 1 / 1 | 0,63 / 0,78 |
@@ -196,8 +197,199 @@ abaixo de 0,05; não ficou.
   1.24 (aqui roda a 2.2.6). A correção recria esse alias (o `float` nativo) e roda o
   avaliador num único processo; o código do AMA não foi tocado (`8505d29`).
 
-### 2.3 Rodada de seleção
+### 2.3 Rodada de seleção — interrompida após o 1º vídeo
 
 `bash benchmark/run_qabp.sh selecao`, com 4 vídeos e as variantes denso, fixo
-1536/1024/512 e fixo 1536/1024 com atenção proporcional. A ordem das variantes alterna a
-cada batch. Em andamento.
+1536/1024/512 e fixo 1536/1024 com atenção proporcional (AP). A ordem das variantes alterna
+a cada batch.
+
+A rodada parou no 2º vídeo, quando o Jetson reiniciou sozinho. Ele reiniciou de novo uma
+hora depois, outra vez com a GPU em carga contínua. A causa é desconhecida: o journal do
+sistema não é persistente. Numa rodada posterior de 1h15, o `tegrastats`
+(`logs/tegrastats.log`) registrou no máximo 71 °C e 43 W, longe dos limites do Orin.
+
+Só o vídeo `28557_NoAudio_5` ficou completo (914 clipes, 16 ações, uma de cada classe).
+Ele foi avaliado à parte em `selecao-parcial/28557_NoAudio_5/`. Fronteiras e confiança
+aparecem como "variante / denso nas mesmas ações", sobre as ações que os dois encontram
+(ver §3).
+
+| | Denso | 1536 | 1024 | 512 | 1536 + AP | 1024 + AP |
+|---|---:|---:|---:|---:|---:|---:|
+| Ações reencontradas | 16/16 | 15/16 | 9/16 | 4/16 | 15/16 | 9/16 |
+| mAP médio | 1,00 | 1,00 | 0,93 | 0,53 | 1,00 | 0,90 |
+| Falsos positivos | 2 | 2 | 6 | 8 | 3 | 3 |
+| Início (s) | 0,57 | 0,70 / 0,57 | 0,55 / 0,37 | 0,67 / 0,36 | 0,58 / 0,57 | 0,68 / 0,37 |
+| Fim (s) | 1,22 | 1,09 / 1,26 | 1,64 / 0,78 | 3,17 / 0,20 | 0,97 / 1,26 | 1,80 / 0,78 |
+| Confiança | 0,79 | 0,77 / 0,82 | 0,76 / 0,85 | 0,59 / 0,82 | 0,78 / 0,82 | 0,73 / 0,85 |
+| Cosseno P50 com o denso | 1 | 0,78 | 0,52 | 0,08 | 0,79 | 0,49 |
+| Tempo por clipe | 2,05 s | 1,44 s | 0,94 s | 0,55 s | 1,36 s | 0,91 s |
+| Speedup medido | 1,00× | 1,43× | 2,19× | 3,75× | 1,51× | 2,25× |
+
+**Leitura:**
+- **512 quebra a inferência:** só 4 ações e 8 falsos positivos.
+- **1536 fica praticamente igual ao denso.**
+- **1024 perde 7 ações, todas sutis:** bocejar, cantar, conversar com o banco de trás,
+  digitar à direita, ajustar o painel, pegar algo do chão do lado do passageiro e a direção
+  normal. Os gestos grandes sobrevivem: beber, comer, pegar algo do chão do lado do
+  motorista e alcançar o banco de trás são encontrados até em 512.
+- **O mAP satura:** com uma ação por classe, a contagem de ações reencontradas é mais
+  informativa que ele.
+- **A atenção proporcional não ganha na tarefa:** empata no 1536 e, no 1024, encontra as
+  mesmas 9 ações com menos falsos positivos. Ela saiu 3–5% mais rápida porque usa o kernel
+  de atenção do PyTorch (`scaled_dot_product_attention`), enquanto a atenção do modelo
+  monta a matriz `q·kᵀ` inteira. Trocar esse kernel pode acelerar todas as variantes; isso
+  não foi explorado.
+
+### 2.4 Por que um teste antigo com 512 tokens tinha sido favorável
+
+O teste antigo (`outputs-temp`, setembro de 2026, em CPU) usou 512 tokens com corte após o
+bloco 2. Ele rodou num trecho de 19 s **recortado no motorista** (`28558_NoAudio_5`,
+`crop_videos`) e centrado numa ação de beber. O AMA encontrou a mesma ação, e o cosseno
+P50 com o denso foi 0,955 (P10 0,51).
+
+Conferi que o algoritmo, o pré-processamento e os pesos são os mesmos de hoje. O código
+de merge, scoring, atenção e encoder é idêntico, e a `LayerNorm` final do checkpoint
+reproduz exatamente os descritores antigos.
+
+Para separar recorte e conteúdo, `benchmark/qabp_crop.py` mediu o cosseno com o denso em
+512 tokens, na CPU:
+
+| Clipe | Conteúdo | Quadro inteiro | Recorte |
+|---|---|---:|---:|
+| `13522_7` ~201 s | Drinking | 0,75 | 0,97 |
+| `30932_5` ~360 s | Drinking | 0,98 | 0,99 |
+| `13522_7` ~391 s | Reaching behind | 0,04 | 0,15 |
+| `13522_7@0` | sem ação anotada | −0,15 | 0,31 |
+| `30932_5@0` | sem ação anotada | 0,12 | 0,18 |
+| `31903_5@0` | sem ação anotada | 0,79 | 0,83 |
+
+A CPU reproduz a GPU do P0 com diferença de até 0,002. **O conteúdo pesa mais que o
+recorte.** Gestos localizados, como beber, sobrevivem à poda, e os demais clipes desabam.
+O recorte ajuda pouco. O resultado se decide nos 10 últimos blocos: até o bloco 30 todos
+os clipes se afastam do denso de forma parecida (~0,5–0,6) e, depois, uns voltam à
+resposta do denso e outros desabam.
+
+### 2.5 Quais tokens × quantos tokens (vídeo `28557_NoAudio_5`)
+
+**Para onde vão os tokens** (`selecao-tokens/`: um clipe no meio de cada uma de 10 ações,
+só até o bloco 2, sem máscara):
+- **Em 512:** 30 das 64 posições de cada fatia, ou 44% dos tokens, são as mesmas em pelo
+  menos 9 dos 10 clipes, seja qual for a ação. São a luz do teto, as bordas das janelas, os
+  encostos dos bancos de trás e o carimbo de data e hora queimado no vídeo. O carimbo
+  sozinho fica com 7% dos tokens e ocupa 2% da imagem.
+- **Em 1024:** 112 das 128 posições se repetem da mesma forma.
+- **Nas ações sutis,** o rosto e as mãos recebem poucos tokens.
+
+**Mesma quantidade, critérios diferentes** (`benchmark/qabp_selection.py`: `criterio-512/`
+e `criterio-1024/`, mais `selecao` para o critério atual). Os números são ações
+reencontradas e, entre parênteses, o mAP médio:
+
+| Critério | 512 | 1024 |
+|---|---:|---:|
+| Atual (movimento + unicidade, sem máscara) | 4/16 (0,53) | 9/16 (0,93) |
+| Aleatório | 3/16 (0,30) | 14/16 (0,94) |
+| Máscara do motorista\* | 5/16 (0,77) | 16/16 (1,00) |
+| Máscara\* sem o carimbo de data | 5/16 (0,55) | 16/16 (1,00) |
+
+\* `region-novo.json`. Essa máscara foi calibrada nos 16 vídeos locais, este incluído, e
+por isso tem vazamento; o §2.6 a substitui pela máscara justa. O braço "só movimento"
+(`motion_weight` = 1) foi descartado: ele mantinha os tokens da 1ª fatia pela posição na
+grade (corrigido em `518c321`, ver §3).
+
+**Leitura:**
+- **Em 512, a quantidade domina:** nenhum critério passa de 5/16.
+- **Em 1024, o critério decide.** O atual é pior que o aleatório, porque gasta o orçamento
+  em pontos fixos da cena. Com a máscara, as 16 ações voltam.
+
+### 2.6 Máscara justa: só os motoristas de ajuste
+
+`benchmark/results/qabp/regiao/regiao-ajuste.json` é a mediana, por coordenada, das
+maiores caixas do motorista nos vídeos de ajuste (13522, 31903, 33682). As caixas vêm do
+próprio `region-novo.json`, e o arquivo registra essa origem. O resultado é
+[0,099; 0,207; 0,850; 0,994], com 169 posições contra 156; a diferença é uma linha a mais
+no alto. Nos estágios em que a região escolhe tokens, o `run_qabp.sh` usa essa máscara
+(`MASK`).
+
+Vídeo `28557_NoAudio_5` em 1024 tokens (`criterio-1024-mascara-justa/`):
+- **Resultado:** 15/16 ações, mAP 1,00 e 2 falsos positivos, como o denso.
+- **A 16ª ação foi encontrada por um fio.** "Adjust control panel" (467–478 s) saiu na
+  classe certa, em 465,4–476,3 s (tIoU 0,74), com confiança 0,299, logo abaixo do
+  limiar de 0,3.
+- **Nas 15 ações em comum com o denso:** início 0,57 s contra 0,58 s, fim 1,19 s contra
+  1,08 s e confiança 0,72 contra 0,79.
+- **Custo:** 0,94 s por clipe (2,18×).
+
+### 2.7 Confirmação nos outros vídeos de seleção
+
+`bash benchmark/run_qabp.sh confirmacao` (`confirmacao/`): vídeos `28557_7`, `30932_5` e
+`30932_7` (48 ações), máscara justa, `benchmark run --masked 1024 768`. Foram ~2h50 de GPU,
+sem queda.
+
+| | Denso | 1024 + máscara | 768 + máscara |
+|---|---:|---:|---:|
+| Ações reencontradas | 48/48 | 41/48 | 36/48 |
+| mAP médio | 1,00 | 0,95 | 0,89 |
+| Falsos positivos | 3 | 5 | 10 |
+| Início (s): variante / denso nas mesmas ações | 0,55 | 0,68 / 0,44 | 0,76 / 0,43 |
+| Fim (s): variante / denso nas mesmas ações | 0,65 | 0,84 / 0,52 | 0,85 / 0,53 |
+| Confiança: variante / denso nas mesmas ações | 0,80 | 0,76 / 0,82 | 0,71 / 0,82 |
+| Tempo por clipe | 2,03 s | 0,94 s | 0,78 s |
+| Speedup medido | 1,0× | 2,17× | 2,60× |
+
+Ações reencontradas por vídeo (o denso acerta 16/16 em todos):
+
+| Vídeo | 1024 + máscara | 768 + máscara |
+|---|---:|---:|
+| `28557_7` | 15/16 | 10/16 |
+| `30932_5` | 14/16 | 13/16 |
+| `30932_7` | 12/16 | 13/16 |
+
+O 1024 com máscara perdeu 7 ações:
+- **5 perdas de verdade, todas do motorista 30932:** direção normal (nos dois vídeos),
+  conversar com o banco de trás, ajustar o painel e bocejar.
+- **2 por fronteira:** Phone R (tIoU 0,39; o próprio denso fica em 0,54) e Eating (0,31).
+
+**Leitura:**
+- **A máscara é a mudança certa,** mas o 1024 com máscara não equivale ao denso em todos os
+  motoristas. O 28557 fica em 15/16 nos dois vídeos; o 30932 perde de 2 a 4 ações sutis por
+  vídeo.
+- **Fronteiras:** nas ações em comum com o denso, ficam cerca de 55–60% mais imprecisas.
+- **O 768 não compensa:** é só ~17% mais rápido que o 1024, perde mais ações e dobra os
+  falsos positivos.
+- **Em aberto:**
+  - o 1536 com máscara no motorista 30932;
+  - a perda aceitável (δ), que ainda não foi definida.
+
+## 3. Correções de código desta etapa (auditoria do repositório)
+
+| Commit | Correção | Efeito nos resultados |
+|---|---|---|
+| `a8d375f` | O relatório compara fronteiras e confiança só nas ações que a variante e o denso encontram, e mostra o denso nessas mesmas ações | Mudou a leitura: no §2.7, as fronteiras do 1024 com máscara pareciam 0,13 / 0,19 s piores que as do denso; nas mesmas ações, são 0,24 / 0,33 s piores |
+| `518c321` | `motion_weight` = 1 é recusado | O braço "só movimento" do §2.5 era inválido e foi descartado |
+| `e9d8017` | `benchmark run` grava as linhas antes das features e cada arquivo de features inteiro, e a retomada descarta o que uma queda deixou e refaz o vídeo | Proteção contra as reinicializações do Jetson |
+| `94669c6` | `budget-curve` refaz um vídeo que o `sources.json` não lista e grava esse arquivo inteiro | Uma queda não tira mais um vídeo da calibração sem aviso |
+| `a8da0af` | O `run_qabp.sh` só pula o AMA quando o manifesto final existe, e o relatório avisa quais variantes ficaram sem saída do AMA | Um AMA interrompido não gera mais um relatório sem métricas sem aviso |
+| `dc8583b` | Uma região calibrada em vídeos ou motoristas avaliados é recusada onde escolhe tokens; a sobreposição vai para o `run.json`; o script de critérios grava a região de fato usada | O `region-novo.json` não serve mais para escolher tokens; o estudo de máscaras antigo, calibrado nos vídeos avaliados, não roda mais com ele |
+
+Também entraram nesta etapa:
+- `benchmark run --masked`, para orçamentos fixos com a máscara do motorista (`7cbc219`);
+- os diagnósticos `benchmark/qabp_crop.py` e `benchmark/qabp_selection.py`;
+- os estágios `proxy`, `criterio` e `confirmacao` do `run_qabp.sh`.
+
+## 4. Estado e pendências
+
+- **`selecao`:** só o 1º vídeo está completo, e os outros 3 não têm 1536 nem atenção
+  proporcional; a confirmação do §2.7 cobre o 1024 e o 768 com máscara.
+  `bash benchmark/run_qabp.sh selecao` retoma a partir do 2º vídeo. Nesse estudo de
+  políticas, o `region-novo.json` continua só como região registrada, sem escolher tokens.
+- **Adiadas pelo dono:**
+  - a Fase B (estudo de proxies);
+  - a Fase C (QABP orientada à tarefa).
+
+  Qualquer política adaptativa, legada ou QABP, precisa ser recalibrada com a máscara:
+  a QABP v1 recusa máscaras.
+- **Limites que continuam valendo:**
+  - os vídeos locais estão no subset de treino do AMA;
+  - o benchmark usa o quadro inteiro, e o AMA foi treinado com recortes;
+  - os 18 vídeos de validação independente não estão nesta máquina;
+  - a causa das reinicializações do Jetson é desconhecida.
