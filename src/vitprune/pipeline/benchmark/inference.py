@@ -108,24 +108,29 @@ def save_frames(bench: Benchmark, video: Path, clips: list[dict]) -> None:
 def encoders(bench: Benchmark, model, policies: dict, region) -> dict[str, PrunedEncoder]:
     """One encoder per variant, the dense one first. ``policies`` maps a variant's name to
     its budget; the mask study's policy is ``legacy_original``."""
-    layer, plans = bench.prune_layer, {"denso": PruningPlan.dense()}
+    layer, plans = bench.prune_layer, {"denso": PruningPlan.dense(attention=bench.attention)}
     if bench.policy_study:
-        plans |= {name: PruningPlan(prune_layer=layer, budget=budget)
+        plans |= {name: PruningPlan(prune_layer=layer, budget=budget, attention=bench.attention)
                   for name, budget in policies.items()}
-        plans |= {f"fixo_{k}": PruningPlan(prune_layer=layer, budget=FixedBudget(k))
+        plans |= {f"fixo_{k}": PruningPlan(prune_layer=layer, budget=FixedBudget(k),
+                                          attention=bench.attention)
                   for k in bench.fixed}
         plans |= {f"fixo_{k}_pa": PruningPlan(prune_layer=layer, budget=FixedBudget(k),
-                                              size_biased_attention=True)
+                                              size_biased_attention=True, attention=bench.attention)
                   for k in bench.proportional}
         plans |= {f"fixo_{k}_mascara": PruningPlan(prune_layer=layer, budget=FixedBudget(k),
-                                                   spatial_prior=region)
+                                                   spatial_prior=region, attention=bench.attention)
                   for k in bench.masked}
+        if bench.progressive:
+            plans[bench.progressive_name] = PruningPlan(
+                prune_layer=layer, budget=FixedBudget(bench.progressive[0][1]),
+                spatial_prior=region, stages=bench.progressive[1:], attention=bench.attention)
     else:
         fixed = top_rows_prior(GEOMETRY.grid_size, bench.fixed_rows, bench.fixed_weight)
         priors = {"vitprune": None, "vitprune_mascara_fixa": fixed,
                   "vitprune_mascara_inteligente": region}
         plans |= {name: PruningPlan(prune_layer=layer, budget=policies["legacy_original"],
-                                    spatial_prior=prior)
+                                    spatial_prior=prior, attention=bench.attention)
                   for name, prior in priors.items()}
     return {name: PrunedEncoder(model, GEOMETRY, plans[name]) for name in bench.variants}
 
@@ -311,6 +316,7 @@ def write_manifests(bench: Benchmark, videos: list[Path], runners: dict) -> None
                       "prune_layer": plan.prune_layer if plan.prunes else 0,
                       "policy": plan.budget.version if plan.prunes else None,
                       "size_biased_attention": plan.size_biased_attention,
+                      "attention": plan.attention, "stages": [list(stage) for stage in plan.stages],
                       "precision": bench.precision, "device": bench.device,
                       "geometry": asdict(GEOMETRY),
                       "fixed_mask": bench.fixed_mask if name == "vitprune_mascara_fixa" else None,
@@ -364,11 +370,14 @@ def run_benchmark(bench: Benchmark) -> None:
     videos = bench.evaluated()
     evaluated = {video.stem: SourceFile.of(video).sha256 for video in videos}
     overlap = {name: calibration_overlap(path, evaluated) for name, path in files.items()}
-    if not bench.policy_study or bench.masked:  # then the region chooses which tokens stay
+    if not bench.policy_study or bench.masked or bench.progressive:
         overlap["--region"] = calibration_overlap(bench.region, evaluated)
     tainted = {name: found for name, found in overlap.items()
                if (name == "--region" or isinstance(policies[name], QualityAwareBudgetPolicy))
                and (found["videos"] or found["drivers"])}
+    if bench.allow_region_overlap and tainted.pop("--region", None):
+        print("warning: the region overlaps the evaluated footage; run as asked by "
+              "--allow-region-overlap and recorded in run.json", flush=True)
     if tainted:
         raise ValueError(f"a quality-aware policy or the region calibrated on an evaluated "
                          f"video or driver: {tainted}; calibrate it on other drivers")
@@ -390,6 +399,12 @@ def run_benchmark(bench: Benchmark) -> None:
                      "fixed": list(bench.fixed), "proportional": list(bench.proportional)}
         if bench.masked:  # only when used, so the runs made before it still resume
             settings["masked"] = list(bench.masked)
+        if bench.progressive:
+            settings["progressive"] = [list(stage) for stage in bench.progressive]
+    if bench.attention != "model":
+        settings["attention"] = bench.attention
+    if bench.allow_region_overlap:
+        settings["allow_region_overlap"] = True
     refuse_other_runs(bench.record, settings, bench.policy, bench.region)
     model = load_model(bench)
     if not bench.record.exists():

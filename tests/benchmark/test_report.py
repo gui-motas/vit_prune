@@ -347,6 +347,27 @@ def test_a_masked_budget_is_named_for_its_mask():
     assert report.short_label("fixo_768_mascara") == "Fixo 768 + máscara"
 
 
+def test_a_progressive_budget_is_named_for_its_stages():
+    variant = "prog_1536_1024_768_mascara"
+    assert report.variant_name(variant) == (
+        "ViT-Prune progressivo 1536→1024→768 + máscara do motorista")
+    assert report.short_label(variant) == "Prog 1536→1024→768 + máscara"
+
+
+def test_a_progressive_variant_can_be_reported(tmp_path):
+    pytest.importorskip("openpyxl")
+    out = _policy_run(tmp_path)
+    variant = "prog_32_24_mascara"
+    for folder in ("features", "ama"):
+        (out / folder / "fixo_32_pa").rename(out / folder / variant)
+    for file in ("clips.jsonl", "run.json"):
+        path = out / file
+        path.write_text(path.read_text("utf-8").replace("fixo_32_pa", variant), "utf-8")
+    book = pd.ExcelFile(report.make_report(out))
+    assert "ViT-Prune progressivo 32→24 + máscara do motorista" in (
+        book.parse("Resumo")["Variante"].tolist())
+
+
 def test_boundaries_and_confidence_are_compared_on_the_actions_both_runs_find(tmp_path):
     pytest.importorskip("openpyxl")
     out = _policy_run(tmp_path)

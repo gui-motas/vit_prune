@@ -368,3 +368,67 @@ def test_the_overlap_of_a_mask_with_the_evaluated_videos_is_recorded(bench, mode
 
     overlap = json.loads(bench.record.read_text("utf-8"))["calibration_overlap"]
     assert overlap["--region"] == {"videos": [], "drivers": []}
+
+
+def test_attention_is_used_for_every_mask_and_policy_plan(bench, model, geometry, uniform_budget):
+    region = torch.ones(geometry.tokens_per_slice)
+    budget = uniform_budget(geometry, 16)
+    bench.attention = "sdpa"
+    mask_plans = inference.encoders(bench, model, {"legacy_original": budget}, region)
+    assert all(encoder.plan.attention == "sdpa" for encoder in mask_plans.values())
+    bench.fixed, bench.proportional, bench.masked = (32,), (32,), (32,)
+    bench.progressive = ((2, 32), (3, 24))
+    runners = inference.encoders(bench, model, {"legacy_original": budget}, region)
+    assert all(encoder.plan.attention == "sdpa" for encoder in runners.values())
+    plan = runners["prog_32_24_mascara"].plan
+    assert plan.budget.tokens == 32 and plan.spatial_prior is region
+    assert plan.stages == ((3, 24),)
+
+
+def test_progressive_run_records_settings_and_manifests_and_resumes(bench, model):
+    bench.policy = None
+    bench.attention = "sdpa"
+    bench.progressive = ((2, 32), (3, 24))
+    inference.run_benchmark(bench)
+    record = json.loads(bench.record.read_text("utf-8"))
+    assert record["settings"]["attention"] == "sdpa"
+    assert record["settings"]["progressive"] == [[2, 32], [3, 24]]
+    assert "allow_region_overlap" not in record["settings"]
+    for variant, stages in (("denso", []), ("prog_32_24_mascara", [[3, 24]])):
+        manifest = json.loads((bench.features / variant / MANIFEST_NAME).read_text("utf-8"))
+        assert manifest["settings"]["attention"] == "sdpa"
+        assert manifest["settings"]["stages"] == stages
+    assert {row["variant"] for row in _rows(bench)} == {"denso", "prog_32_24_mascara"}
+    inference.run_benchmark(bench)
+    bench.attention = "model"
+    with pytest.raises(ValueError, match="another configuration"):
+        inference.run_benchmark(bench)
+
+
+def test_progressive_region_overlap_requires_opt_in(bench, model, tmp_path, capsys):
+    bench.region = _region_from(bench, tmp_path / "leaky.json", {"v": [0.1, 0.2, 0.9, 1.0]})
+    bench.policy = None
+    bench.progressive = ((2, 32), (3, 24))
+    with pytest.raises(ValueError, match="region"):
+        inference.run_benchmark(bench)
+    bench.allow_region_overlap = True
+    inference.run_benchmark(bench)
+    assert "warning" in capsys.readouterr().out
+    record = json.loads(bench.record.read_text("utf-8"))
+    assert record["settings"]["allow_region_overlap"] is True
+    assert record["calibration_overlap"]["--region"]["videos"] == ["v"]
+
+
+def test_allowing_region_overlap_still_refuses_a_tainted_quality_policy(bench, tmp_path):
+    bench.region = _region_from(bench, tmp_path / "leaky.json", {"v": [0.1, 0.2, 0.9, 1.0]})
+    bench.policies = (("qabp", _quality_file(tmp_path / "q.json", drivers=("v",))),)
+    bench.progressive = ((2, 32), (3, 24))
+    bench.allow_region_overlap = True
+    with pytest.raises(ValueError, match="qabp"):
+        inference.run_benchmark(bench)
+
+
+def test_default_record_settings_remain_compatible(bench, model):
+    inference.run_benchmark(bench)
+    settings = json.loads(bench.record.read_text("utf-8"))["settings"]
+    assert not {"attention", "progressive", "allow_region_overlap"} & settings.keys()

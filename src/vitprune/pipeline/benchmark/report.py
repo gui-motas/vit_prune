@@ -74,6 +74,10 @@ def _fixed(variant: str) -> tuple[int, str] | None:
 
 def variant_name(variant: str) -> str:
     """A variant's name in the tables."""
+    progressive = re.fullmatch(r"prog_(\d+(?:_\d+)+)_mascara", variant)
+    if progressive:
+        tokens = progressive.group(1).replace("_", "→")
+        return f"ViT-Prune progressivo {tokens} + máscara do motorista"
     fixed = _fixed(variant)
     if fixed:
         extra = {"pa": " + atenção proporcional", "mascara": " + máscara do motorista"}
@@ -85,6 +89,9 @@ def short_label(variant: str) -> str:
     """A variant's name for a chart axis; the dense one says it is the reference."""
     if variant == "denso":
         return "Denso (referência)"
+    progressive = re.fullmatch(r"prog_(\d+(?:_\d+)+)_mascara", variant)
+    if progressive:
+        return f"Prog {progressive.group(1).replace('_', '→')} + máscara"
     fixed = _fixed(variant)
     if fixed:
         return f"Fixo {fixed[0]}" + {"pa": " + AP", "mascara": " + máscara"}.get(fixed[1], "")

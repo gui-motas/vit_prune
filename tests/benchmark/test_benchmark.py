@@ -255,3 +255,40 @@ def test_masked_budgets_come_from_their_flag(tmp_path, monkeypatch):
     assert main(command) == 0
     assert seen[0].policy is None and seen[0].masked == (1024, 768)
     assert seen[0].variants == ("denso", "fixo_1024_mascara", "fixo_768_mascara")
+
+
+def test_progressive_options_come_from_the_command_line(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")
+    from vitprune.pipeline.benchmark import inference
+
+    seen = []
+    monkeypatch.setattr(inference, "run_benchmark", seen.append)
+    command = ["benchmark", "run", "--videos", str(tmp_path), "--region", "r.json",
+               "--weights", "w.pth", "--model-source", "src", "--attention", "sdpa",
+               "--progressive", "1536", "10:1024", "20:768", "--allow-region-overlap"]
+    assert main(command) == 0
+    bench = seen[0]
+    assert bench.progressive == ((2, 1536), (10, 1024), (20, 768))
+    assert bench.variants == ("denso", "prog_1536_1024_768_mascara")
+    assert bench.policy_study and bench.attention == "sdpa" and bench.allow_region_overlap
+
+
+@pytest.mark.parametrize("progressive", [
+    ("1001", "10:768"), ("1536",), ("1536", "bad"), ("1536", "10:xx"),
+    ("1536", "2:1024"), ("1536", "40:1024"), ("1536", "10:512"),
+])
+def test_invalid_progressive_command_is_refused(tmp_path, progressive):
+    command = _run_command(tmp_path, "--progressive", *progressive)
+    assert main(command) == 2
+
+
+@pytest.mark.parametrize("changes", [
+    {"attention": "bad"},
+    {"progressive": ((2, 1536),)},
+    {"progressive": ((3, 1536), (10, 1024))},
+    {"progressive": ((2, 1536), (10, 1024)),
+     "policies": (("prog_1536_1024_mascara", "p.json"),)},
+])
+def test_invalid_progressive_settings_are_refused(tmp_path, changes):
+    with pytest.raises(ValueError):
+        _benchmark(tmp_path, **changes)

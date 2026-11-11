@@ -513,6 +513,15 @@ def _run_benchmark_run(args) -> int:
         if not name or not path:
             raise ValueError(f"--policies takes NAME=PATH, got {item!r}")
         policies.append((name, path))
+    progressive = ()
+    if args.progressive:
+        if len(args.progressive) < 2:
+            raise ValueError("--progressive needs TOKENS and at least one BLOCK:TOKENS")
+        try:
+            progressive = ((args.prune_layer, int(args.progressive[0])), *(
+                tuple(int(value) for value in item.split(":")) for item in args.progressive[1:]))
+        except ValueError as error:
+            raise ValueError("--progressive takes TOKENS followed by BLOCK:TOKENS") from error
     bench = Benchmark(
         videos=args.videos,
         out=args.out,
@@ -535,11 +544,15 @@ def _run_benchmark_run(args) -> int:
         fixed=tuple(args.fixed or ()),
         proportional=tuple(args.proportional or ()),
         masked=tuple(args.masked or ()),
+        attention=args.attention,
+        progressive=progressive,
+        allow_region_overlap=args.allow_region_overlap,
     )
 
     print(RULE)
     if bench.policy_study:
-        masked = ", the _mascara ones inside the driver region" if bench.masked else ", no mask"
+        masked = (", the _mascara ones inside the driver region"
+                  if bench.masked or bench.progressive else ", no mask")
         print(f"the dense backbone and {len(bench.variants) - 1} budgets{masked}, on every clip")
     else:
         print("the dense backbone and three ViT-Prune variants, on every clip")
@@ -936,6 +949,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--masked", nargs="+", type=int, metavar="TOKENS",
         help="policy study: fixed budgets selecting inside the --region, as fixo_TOKENS_mascara",
     )
+    bench_run.add_argument(
+        "--progressive", nargs="+", metavar="TOKENS|BLOCK:TOKENS",
+        help="policy study: tokens at the cut followed by later BLOCK:TOKENS merges in the region",
+    )
+    bench_run.add_argument(
+        "--allow-region-overlap", action="store_true",
+        help="run a --region calibrated on an evaluated video or driver and record it; "
+             "for exploratory runs only",
+    )
     bench_run.add_argument("--region", required=True, help="written by 'vitprune region'")
     _add_model_arguments(bench_run)
     bench_run.add_argument(
@@ -952,6 +974,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--precision", default="off", choices=["fp16", "bf16", "off"],
         help="off is fp32, as the AI City extraction ran; calibrate with the same (default: off)",
     )
+    bench_run.add_argument("--attention", choices=["model", "sdpa"], default="model",
+                           help="attention implementation for every variant (default: model)")
     bench_run.add_argument(
         "--prune-layer", type=int, default=2, help="prune after this block (default: 2)"
     )

@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from vitprune.core.encoder import PruningPlan
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 from vitprune.core.policy import FixedBudget
 from vitprune.core.priors import top_rows_prior
@@ -37,7 +38,8 @@ class Benchmark:
 
     Two studies share the run. The mask study compares the dense VideoMAE with ViT-Prune
     without a mask, with the fixed mask and with the driver region, under ``policy``. The
-    policy study, chosen by giving ``policies``, ``fixed``, ``proportional`` or ``masked``,
+    policy study, chosen by giving ``policies``, ``fixed``, ``proportional``, ``masked`` or
+    ``progressive``,
     compares budgets instead: the dense VideoMAE, ``policy`` when given (as
     ``legacy_original``), each named policy file, and fixed budgets, plain, with size-biased
     attention, or selecting inside the driver region. Only the last use a mask.
@@ -63,6 +65,9 @@ class Benchmark:
             ``fixo_<tokens>_pa``.
         masked: tokens of each fixed-budget variant whose selection takes the driver
             ``region`` as its spatial prior, ``fixo_<tokens>_mascara``.
+        attention: backbone attention implementation, ``model`` or ``sdpa``.
+        progressive: cut and later merges as ``(block, tokens)`` pairs.
+        allow_region_overlap: allow and record a region calibrated on evaluated footage.
     """
 
     videos: Path
@@ -86,6 +91,9 @@ class Benchmark:
     fixed: tuple[int, ...] = ()
     proportional: tuple[int, ...] = ()
     masked: tuple[int, ...] = ()
+    attention: str = "model"
+    progressive: tuple[tuple[int, int], ...] = ()
+    allow_region_overlap: bool = False
 
     def __post_init__(self) -> None:
         for name in ("videos", "out", "region", "weights", "model_source"):
@@ -95,6 +103,18 @@ class Benchmark:
         self.policies = tuple((str(name), Path(path)) for name, path in self.policies)
         self.fixed, self.proportional = tuple(self.fixed), tuple(self.proportional)
         self.masked = tuple(self.masked)
+        if self.attention not in ("model", "sdpa"):
+            raise ValueError("attention must be 'model' or 'sdpa'")
+        if self.progressive:
+            if (not isinstance(self.progressive, (tuple, list))
+                    or any(not isinstance(stage, (tuple, list)) or len(stage) != 2
+                           for stage in self.progressive)):
+                raise ValueError("progressive must be (block, tokens) pairs")
+            self.progressive = tuple(tuple(stage) for stage in self.progressive)
+            if len(self.progressive) < 2 or self.progressive[0][0] != self.prune_layer:
+                raise ValueError("progressive needs the cut and at least one later stage")
+            PruningPlan(prune_layer=self.prune_layer, budget=FixedBudget(self.progressive[0][1]),
+                        stages=self.progressive[1:]).validate_for(GEOMETRY)
         names = [name for name, _ in self.policies]
         for name in names:
             fixed = name.startswith("fixo_")
@@ -103,6 +123,8 @@ class Benchmark:
                                  f"{RESERVED} nor fixo_*: got {name!r}")
         if len(set(names)) != len(names):
             raise ValueError(f"policy variant names must be unique, got {names}")
+        if self.progressive and self.progressive_name in names:
+            raise ValueError("a policy variant conflicts with the progressive variant")
         for levels in (self.fixed, self.proportional, self.masked):
             if len(set(levels)) != len(levels):
                 raise ValueError(f"fixed budgets must be unique, got {levels}")
@@ -120,7 +142,12 @@ class Benchmark:
     @property
     def policy_study(self) -> bool:
         """Budgets compared with one another, rather than masks under one policy."""
-        return bool(self.policies or self.fixed or self.proportional or self.masked)
+        return bool(self.policies or self.fixed or self.proportional or self.masked
+                    or self.progressive)
+
+    @property
+    def progressive_name(self) -> str:
+        return "prog_" + "_".join(str(tokens) for _, tokens in self.progressive) + "_mascara"
 
     @property
     def variants(self) -> tuple[str, ...]:
@@ -129,7 +156,8 @@ class Benchmark:
         return ("denso", *(("legacy_original",) if self.policy is not None else ()),
                 *(name for name, _ in self.policies), *(f"fixo_{k}" for k in self.fixed),
                 *(f"fixo_{k}_pa" for k in self.proportional),
-                *(f"fixo_{k}_mascara" for k in self.masked))
+                *(f"fixo_{k}_mascara" for k in self.masked),
+                *((self.progressive_name,) if self.progressive else ()))
 
     @property
     def span(self) -> int:
