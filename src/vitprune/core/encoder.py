@@ -15,10 +15,8 @@ happens after the second block, and the reasoning has two opposing sides:
 * Pruning later wastes. Cutting at block thirty means having paid full cost for
   thirty blocks to save on ten.
 
-Two blocks are the default hypothesis, not a universally validated optimum. A progressive
-schedule, pruning a little at each block, was considered and dropped: with forty
-blocks the early ones cost little, so the advantage disappears in exchange for
-considerably more complexity.
+Two blocks are the default hypothesis, not a universally validated optimum. Optional
+later stages allow progressive merging for comparison with the single-cut baseline.
 """
 
 from __future__ import annotations
@@ -26,10 +24,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
-from numbers import Real
+from numbers import Integral, Real
 from typing import NamedTuple
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vitprune.core.attention import run_block
@@ -41,7 +40,13 @@ from vitprune.core.compressibility import (
 )
 from vitprune.core.geometry import ClipGeometry, validate_prune_layer
 from vitprune.core.inspection import TokenSelection
-from vitprune.core.merging import initial_sizes, merge_error, merge_tokens, size_weighted_mean
+from vitprune.core.merging import (
+    bipartite_merge,
+    initial_sizes,
+    merge_error,
+    merge_tokens,
+    size_weighted_mean,
+)
 from vitprune.core.policy import (
     BudgetDecision,
     BudgetPolicy,
@@ -67,6 +72,7 @@ class PruningPlan:
         size_biased_attention: enables the proportional attention described in
             :mod:`vitprune.core.attention`. Experimental.
         attention: use the backbone's own attention or the explicit SDPA path.
+        stages: further (block, tokens per clip) merges after the initial cut.
         budget: what decides how many tokens each clip keeps: an adaptive policy, a
             quality-aware one, or a fixed budget. Without one, nothing is pruned; the cut
             still marks where clip statistics are measured, which is what calibration
@@ -80,6 +86,7 @@ class PruningPlan:
     size_biased_attention: bool = False
     budget: BudgetPolicy | QualityAwareBudgetPolicy | FixedBudget | None = None
     attention: str = "model"
+    stages: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         validate_prune_layer(self.prune_layer)
@@ -119,6 +126,24 @@ class PruningPlan:
                 )
             if self.prune_layer == 0:
                 raise ValueError("a budget needs a pruning layer; prune_layer is 0")
+        if not isinstance(self.stages, (tuple, list)):
+            raise ValueError("stages must be a sequence of (block, tokens) pairs")
+        if self.stages:
+            if not isinstance(self.budget, FixedBudget):
+                raise ValueError("stages require a FixedBudget")
+            previous_block, previous_tokens = self.prune_layer, self.budget.tokens
+            for stage in self.stages:
+                if not isinstance(stage, (tuple, list)) or len(stage) != 2:
+                    raise ValueError("each stage must be a (block, tokens) pair")
+                block, tokens = stage
+                if any(isinstance(v, bool) or not isinstance(v, Integral) for v in stage):
+                    raise ValueError("stage blocks and tokens must be integers")
+                if block <= previous_block:
+                    raise ValueError("stage blocks must increase after the pruning layer")
+                if not max(1, previous_tokens // 2) <= tokens < previous_tokens:
+                    raise ValueError("stage tokens must decrease by at most half")
+                previous_block, previous_tokens = block, tokens
+        object.__setattr__(self, "stages", tuple(tuple(stage) for stage in self.stages))
 
     def validate_for(self, geometry: ClipGeometry) -> None:
         """Validate the cut, prior and budget against a concrete backbone geometry."""
@@ -128,6 +153,8 @@ class PruningPlan:
                 raise ValueError("spatial_prior positions must match geometry.tokens_per_slice")
         if self.budget is not None:
             self.budget.validate_for(geometry)
+        if self.stages and self.stages[-1][0] >= geometry.depth:
+            raise ValueError("stage blocks must precede the last block")
 
     @classmethod
     def dense(cls, attention: str = "model") -> PruningPlan:
@@ -149,6 +176,8 @@ class PruningPlan:
         extra = attention + (", size-biased attention" if self.size_biased_attention else "")
         if self.spatial_prior is not None:
             extra += ", spatial prior"
+        if self.stages:
+            extra += ", stages " + " ".join(f"{block}:{tokens}" for block, tokens in self.stages)
         levels = "/".join(str(level) for level in self.budget.levels)
         kind = (
             "fixed" if isinstance(self.budget, FixedBudget)
@@ -260,6 +289,8 @@ class PrunedEncoder(nn.Module):
         keeping fewer tokens than the widest one are padded with position ``-1`` and
         size zero.
         """
+        if self.plan.stages:
+            raise ValueError("select does not support progressive stages")
         grid = self._grid_at_cut(clips, needs_budget=True)
         base = score_tokens(grid, self.plan.motion_weight)
         keeps, _ = self._keeps(grid, base)
@@ -326,6 +357,8 @@ class PrunedEncoder(nn.Module):
             cells, top: the probe's anchors, as in
                 :func:`vitprune.core.compressibility.probe_errors`.
         """
+        if self.plan.stages:
+            raise ValueError("encode_levels does not support progressive stages")
         levels = sorted({*levels, self.geometry.num_tokens})
         for level in levels:
             FixedBudget(level).validate_for(self.geometry)
@@ -394,13 +427,34 @@ class PrunedEncoder(nn.Module):
             else:
                 merged = merge_tokens(part, initial_sizes(part), scores[members], keep)
                 group, sizes = merged.tokens.reshape(count, slices * keep, dim), merged.sizes
-            for block in blocks[cut:]:
+            stages = dict(self.plan.stages)
+            for index, block in enumerate(blocks[cut:], start=cut + 1):
                 group = self._run(block, group, sizes)
+                if index in stages:
+                    if sizes is None:
+                        sizes = group.new_ones((*group.shape[:2], 1))
+                    else:
+                        sizes = sizes.reshape(count, -1, 1)
+                    group, sizes = bipartite_merge(
+                        group, sizes, self._stage_keys(blocks[index], group), stages[index]
+                    )
             pooled = self._pool(group, sizes)
             if embeddings is None:
                 embeddings = pooled.new_empty((clips.shape[0], pooled.shape[1]))
             embeddings[members] = pooled
         return embeddings, budget
+
+    @staticmethod
+    def _stage_keys(block: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
+        batch, count, dim = tokens.shape
+        attention = block.attn
+        bias = None if getattr(attention, "q_bias", None) is not None else getattr(
+            attention.qkv, "bias", None
+        )
+        if bias is not None:
+            bias = bias[dim:2 * dim]
+        keys = F.linear(block.norm1(tokens), attention.qkv.weight[dim:2 * dim], bias)
+        return keys.reshape(batch, count, attention.num_heads, -1).mean(dim=2)
 
     def _keeps(self, grid: torch.Tensor, base: torch.Tensor) -> tuple[torch.Tensor, ClipBudget]:
         """Tokens kept per slice by each clip, and the record of the decision.
@@ -475,24 +529,33 @@ class PrunedEncoder(nn.Module):
         for block in blocks:
             if not callable(block):
                 raise ValueError("each backbone block must be callable")
-        if self.plan.attention == "sdpa" or (self.plan.prunes and self.plan.size_biased_attention):
-            start = 0 if self.plan.attention == "sdpa" else self.plan.prune_layer
-            reason = "SDPA attention" if self.plan.attention == "sdpa" else "size-biased attention"
-            for block in list(blocks)[start:]:
-                for name in ("norm1", "norm2", "mlp", "attn"):
-                    if not callable(getattr(block, name, None)):
-                        raise ValueError(f"{reason} requires block.{name}")
-                attention = block.attn
-                for name in ("qkv", "proj"):
-                    if not callable(getattr(attention, name, None)):
-                        raise ValueError(f"{reason} requires attention.{name}")
-                if (
-                    not isinstance(getattr(attention, "num_heads", None), int)
-                    or attention.num_heads <= 0
-                ):
-                    raise ValueError(f"{reason} requires attention.num_heads")
-                if self.geometry.embed_dim % attention.num_heads:
-                    raise ValueError("attention.num_heads must divide geometry.embed_dim")
+        stage_blocks = {stage for stage, _ in self.plan.stages}
+        for index, block in enumerate(blocks):
+            if self.plan.attention == "sdpa":
+                reason = "SDPA attention"
+            elif (self.plan.prunes and self.plan.size_biased_attention
+                  and index >= self.plan.prune_layer):
+                reason = "size-biased attention"
+            elif index in stage_blocks:
+                reason = "progressive stages"
+            else:
+                continue
+            for name in ("norm1", "norm2", "mlp", "attn"):
+                if not callable(getattr(block, name, None)):
+                    raise ValueError(f"{reason} requires block.{name}")
+            attention = block.attn
+            for name in ("qkv", "proj"):
+                if not callable(getattr(attention, name, None)):
+                    raise ValueError(f"{reason} requires attention.{name}")
+            if (
+                not isinstance(getattr(attention, "num_heads", None), int)
+                or attention.num_heads <= 0
+            ):
+                raise ValueError(f"{reason} requires attention.num_heads")
+            if self.geometry.embed_dim % attention.num_heads:
+                raise ValueError("attention.num_heads must divide geometry.embed_dim")
+            if index in stage_blocks and not hasattr(attention.qkv, "weight"):
+                raise ValueError("progressive stages require attention.qkv.weight")
 
     def _check_eval(self) -> None:
         if any(module.training for module in self.modules()):

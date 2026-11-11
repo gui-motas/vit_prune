@@ -127,12 +127,21 @@ def test_the_size_bias_affects_the_pruned_path(backbone, geometry, clips, pruned
 
 
 @pytest.mark.parametrize("budget", [None, FixedBudget(16)])
-def test_sdpa_attention_matches_model_attention(backbone, geometry, clips, budget):
+def test_sdpa_attention_matches_model_attention(backbone, geometry, clips, budget, monkeypatch):
     model = PruningPlan(prune_layer=2, budget=budget)
     sdpa = PruningPlan(prune_layer=2, budget=budget, attention="sdpa")
     expected = PrunedEncoder(backbone, geometry, model).encode(clips)
+    actual_sdpa = torch.nn.functional.scaled_dot_product_attention
+    calls = []
+
+    def observe(*args, **kwargs):
+        calls.append(args[0].shape[-2])
+        return actual_sdpa(*args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", observe)
     actual = PrunedEncoder(backbone, geometry, sdpa).encode(clips)
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+    assert calls == ([64, 64, 64, 64] if budget is None else [64, 64, 16, 16])
     assert "SDPA attention" in sdpa.describe()
 
 
@@ -154,6 +163,129 @@ def test_sdpa_requires_block_attributes(geometry, index):
     backbone.blocks[index].attn.qkv = None
     with pytest.raises(ValueError, match="attention.qkv"):
         PrunedEncoder(backbone, geometry, PruningPlan.dense(attention="sdpa"))
+
+
+def test_stages_empty_is_unchanged(backbone, geometry, clips):
+    default = PruningPlan(budget=FixedBudget(16))
+    empty = PruningPlan(budget=FixedBudget(16), stages=())
+    actual = PrunedEncoder(backbone, geometry, empty).encode(clips)
+    expected = PrunedEncoder(backbone, geometry, default).encode(clips)
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("attention", ["model", "sdpa"])
+def test_stages_shrink_tokens_after_block(attention):
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    clips = torch.randn(*geometry.input_shape(batch=2))
+    seen = []
+    for block in backbone.blocks:
+        block.attn.proj.register_forward_pre_hook(
+            lambda module, args: seen.append(args[0].shape[1])
+        )
+    plan = PruningPlan(budget=FixedBudget(32), stages=((3, 24), (5, 12)), attention=attention)
+    encoder = PrunedEncoder(backbone, geometry, plan)
+    result = encoder.encode(clips)
+    assert seen == [64, 64, 32, 24, 24, 12]
+    assert result.shape == (2, geometry.embed_dim)
+    assert torch.isfinite(result).all()
+    assert "stages 3:24 5:12" in plan.describe()
+
+
+@pytest.mark.parametrize("stages", [
+    ((3, 24), (3, 16)), ((4, 24), (3, 16)), ((2, 24),), ((6, 24),),
+    ((3, 32),), ((3, 24), (4, 24)), ((3, 24), (4, 25)), ((3, 15),),
+    ((3, 0),), ((True, 24),), ((3, 24.5),), ((3,),),
+])
+def test_stages_validation(stages):
+    geometry = reference_geometry(depth=6)
+    with pytest.raises(ValueError, match="stage"):
+        plan = PruningPlan(budget=FixedBudget(32), stages=stages)
+        PrunedEncoder(reference_backbone(geometry), geometry, plan)
+
+
+def test_stages_require_fixed_budget(backbone, geometry, clips, uniform_budget, quality_budget):
+    quality = quality_budget(backbone, geometry, clips, [16, 64])
+    for budget in (None, uniform_budget(geometry, 32), quality):
+        with pytest.raises(ValueError, match="FixedBudget"):
+            PruningPlan(budget=budget, stages=((3, 16),))
+
+
+def test_stages_refused_by_select_and_encode_levels():
+    geometry = reference_geometry(depth=6)
+    encoder = PrunedEncoder(reference_backbone(geometry), geometry,
+                            PruningPlan(budget=FixedBudget(32), stages=((3, 24),)))
+    clips = torch.randn(*geometry.input_shape())
+    with pytest.raises(ValueError, match="stages"):
+        encoder.select(clips)
+    with pytest.raises(ValueError, match="stages"):
+        encoder.encode_levels(clips, [32])
+
+
+@pytest.mark.parametrize("biased", [False, True])
+def test_stage_over_dense_group(biased):
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    seen = []
+    backbone.blocks[3].attn.proj.register_forward_pre_hook(
+        lambda module, args: seen.append(args[0].shape[1])
+    )
+    encoder = PrunedEncoder(backbone, geometry,
+                            PruningPlan(budget=FixedBudget(64), stages=((3, 48),),
+                                        size_biased_attention=biased))
+    result = encoder.encode(torch.randn(*geometry.input_shape()))
+    assert seen == [48]
+    assert torch.isfinite(result).all()
+
+
+def test_stage_requires_next_block_attributes():
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    backbone.blocks[3].attn.qkv = None
+    with pytest.raises(ValueError, match="attention.qkv"):
+        PrunedEncoder(backbone, geometry, PruningPlan(budget=FixedBudget(32), stages=((3, 24),)))
+
+
+@pytest.mark.parametrize("split_bias", [True, False])
+def test_stages_allow_qkv_without_a_bias_attribute(split_bias):
+    from vitprune.core.testing import ReferenceAttention
+
+    class BiaslessQKV(torch.nn.Module):
+        def __init__(self, weight):
+            super().__init__()
+            self.weight = torch.nn.Parameter(weight.detach().clone())
+
+        def forward(self, x):
+            return torch.nn.functional.linear(x, self.weight)
+
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    attention = ReferenceAttention(geometry.embed_dim, geometry.heads, split_bias)
+    backbone.blocks[3].attn = attention
+    attention.qkv = BiaslessQKV(attention.qkv.weight)
+    encoder = PrunedEncoder(backbone, geometry,
+                            PruningPlan(budget=FixedBudget(32), stages=((3, 24),)))
+    assert torch.isfinite(encoder.encode(torch.randn(*geometry.input_shape()))).all()
+
+
+@pytest.mark.parametrize("split_bias", [True, False])
+def test_stage_keys_use_next_block_key_projection(split_bias):
+    from vitprune.core.testing import ReferenceAttention
+
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    block = backbone.blocks[3]
+    block.attn = ReferenceAttention(geometry.embed_dim, geometry.heads, split_bias)
+    if split_bias:
+        block.attn.q_bias.data.fill_(2)
+    else:
+        block.attn.qkv.bias.data[geometry.embed_dim:2 * geometry.embed_dim].fill_(2)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(budget=FixedBudget(32),
+                                                           stages=((3, 24),)))
+    x = torch.randn(2, 24, geometry.embed_dim)
+    qkv = block.attn._qkv(block.norm1(x))
+    expected = qkv[1].transpose(1, 2).mean(dim=2)
+    torch.testing.assert_close(encoder._stage_keys(block, x), expected)
 
 
 def test_an_incompatible_geometry_fails_with_a_useful_message(backbone, clips):

@@ -188,3 +188,70 @@ def test_merge_error_is_high_for_an_incompatible_group():
     # The one kept token becomes (e1 + e2) / 2: every token sits 45 degrees from it.
     assert torch.allclose(error, torch.full((8,), 1 - 2**-0.5, dtype=torch.float64))
     assert torch.allclose(size_weighted_mean(*_flat(merged)), tokens[0, 0].mean(dim=0)[None])
+
+
+@pytest.mark.parametrize("count", [9, 10])
+def test_bipartite_merge_preserves_pooled_mean_and_mass(count):
+    from vitprune.core.merging import bipartite_merge
+
+    torch.manual_seed(4)
+    tokens = torch.randn(2, count, 8)
+    sizes = torch.rand(2, count, 1) + 0.1
+    metric = torch.randn(2, count, 4)
+    keep = count - count // 3
+    merged, mass = bipartite_merge(tokens, sizes, metric, keep)
+    assert merged.shape == (2, keep, 8)
+    torch.testing.assert_close(mass.sum(1), sizes.sum(1))
+    torch.testing.assert_close(size_weighted_mean(merged, mass), size_weighted_mean(tokens, sizes),
+                               atol=1e-5, rtol=1e-5)
+
+
+def test_bipartite_merge_keep_all_is_identity():
+    from vitprune.core.merging import bipartite_merge
+
+    tokens, sizes, metric = torch.randn(2, 5, 3), torch.ones(2, 5, 1), torch.randn(2, 5, 4)
+    merged, mass = bipartite_merge(tokens, sizes, metric, 5)
+    assert merged is tokens and mass is sizes
+
+
+def test_bipartite_merge_merges_most_similar_pair_first():
+    from vitprune.core.merging import bipartite_merge
+
+    metric = torch.tensor([[[1., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]])
+    tokens = torch.tensor([[[2.], [4.], [8.], [16.]]])
+    merged, sizes = bipartite_merge(tokens, torch.ones(1, 4, 1), metric, 3)
+    assert sizes[0, 0, 0] == 1
+    assert sizes[0, 1, 0] == 2
+    assert merged[0, 1, 0] == 3
+
+
+@pytest.mark.parametrize("keep", [0, 3, 9])
+def test_bipartite_merge_refuses_more_than_half(keep):
+    from vitprune.core.merging import bipartite_merge
+
+    with pytest.raises(ValueError, match="keep"):
+        bipartite_merge(torch.randn(1, 8, 3), torch.ones(1, 8, 1), torch.randn(1, 8, 4), keep)
+
+
+def test_bipartite_merge_low_precision_returns_input_dtype():
+    from vitprune.core.merging import bipartite_merge
+
+    torch.manual_seed(5)
+    tokens = torch.randn(2, 12, 4).bfloat16()
+    sizes = (torch.rand(2, 12, 1) + 0.2).bfloat16()
+    metric = torch.randn(2, 12, 3).bfloat16()
+    merged, mass = bipartite_merge(tokens, sizes, metric, 8)
+    assert merged.dtype == tokens.dtype and mass.dtype == sizes.dtype
+    torch.testing.assert_close(size_weighted_mean(merged.float(), mass.float()),
+                               size_weighted_mean(tokens.float(), sizes.float()),
+                               atol=1e-2, rtol=1e-2)
+
+
+def test_bipartite_merge_rejects_mismatched_shapes():
+    from vitprune.core.merging import bipartite_merge
+
+    tokens = torch.randn(1, 8, 4)
+    with pytest.raises(ValueError, match="sizes"):
+        bipartite_merge(tokens, torch.ones(1, 7, 1), torch.randn(1, 8, 4), 6)
+    with pytest.raises(ValueError, match="metric"):
+        bipartite_merge(tokens, torch.ones(1, 8, 1), torch.randn(1, 7, 4), 6)

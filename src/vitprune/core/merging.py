@@ -21,6 +21,7 @@ be derived on paper.
 
 from __future__ import annotations
 
+from numbers import Integral
 from typing import NamedTuple
 
 import torch
@@ -100,6 +101,42 @@ def merge_tokens(
     size_sum.scatter_add_(2, destination.unsqueeze(-1), pruned_sizes)
 
     return MergedTokens(weighted_sum / size_sum.clamp(min=1e-6), size_sum)
+
+
+@torch.no_grad()
+def bipartite_merge(
+    tokens: torch.Tensor, sizes: torch.Tensor, metric: torch.Tensor, keep: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge the strongest alternating-partition matches, preserving token mass."""
+    if tokens.ndim != 3:
+        raise ValueError("tokens must be [batch, tokens, embed_dim]")
+    batch, count, dim = tokens.shape
+    if sizes.shape != (batch, count, 1):
+        raise ValueError("sizes must be [batch, tokens, 1]")
+    if metric.ndim != 3 or metric.shape[:2] != (batch, count):
+        raise ValueError("metric must be [batch, tokens, channels]")
+    if (isinstance(keep, bool) or not isinstance(keep, Integral)
+            or not max(1, count // 2) <= keep <= count):
+        raise ValueError(f"keep must be between {max(1, count // 2)} and {count}")
+    if keep == count:
+        return tokens, sizes
+
+    metric = F.normalize(metric.float(), dim=-1)
+    similarity = metric[:, ::2] @ metric[:, 1::2].transpose(1, 2)
+    best, destination = similarity.max(dim=-1)
+    order = best.argsort(dim=-1, descending=True).unsqueeze(-1)
+    unmerged, source = order[:, count - keep:], order[:, :count - keep]
+    destination = destination.unsqueeze(-1).gather(1, source)
+
+    weighted = tokens.float() * sizes.float()
+    a, b = weighted[:, ::2], weighted[:, 1::2]
+    sa, sb = sizes.float()[:, ::2], sizes.float()[:, 1::2]
+    b = b.scatter_add(1, destination.expand(-1, -1, dim),
+                      a.gather(1, source.expand(-1, -1, dim)))
+    sb = sb.scatter_add(1, destination, sa.gather(1, source))
+    weighted = torch.cat((a.gather(1, unmerged.expand(-1, -1, dim)), b), dim=1)
+    mass = torch.cat((sa.gather(1, unmerged), sb), dim=1)
+    return (weighted / mass).to(tokens.dtype), mass.to(sizes.dtype)
 
 
 @torch.no_grad()
