@@ -246,6 +246,23 @@ def test_stage_requires_next_block_attributes():
         PrunedEncoder(backbone, geometry, PruningPlan(budget=FixedBudget(32), stages=((3, 24),)))
 
 
+def test_stage_uses_next_block_for_keys(monkeypatch):
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    encoder = PrunedEncoder(backbone, geometry,
+                            PruningPlan(budget=FixedBudget(32), stages=((3, 24),)))
+    seen = []
+    original = encoder._stage_keys
+
+    def observe(block, tokens):
+        seen.append(block)
+        return original(block, tokens)
+
+    monkeypatch.setattr(encoder, "_stage_keys", observe)
+    encoder.encode(torch.randn(*geometry.input_shape()))
+    assert len(seen) == 1 and seen[0] is backbone.blocks[3]
+
+
 @pytest.mark.parametrize("split_bias", [True, False])
 def test_stages_allow_qkv_without_a_bias_attribute(split_bias):
     from vitprune.core.testing import ReferenceAttention

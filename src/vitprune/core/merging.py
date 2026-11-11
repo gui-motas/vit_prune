@@ -121,22 +121,23 @@ def bipartite_merge(
     if keep == count:
         return tokens, sizes
 
-    metric = F.normalize(metric.float(), dim=-1)
-    similarity = metric[:, ::2] @ metric[:, 1::2].transpose(1, 2)
-    best, destination = similarity.max(dim=-1)
-    order = best.argsort(dim=-1, descending=True).unsqueeze(-1)
-    unmerged, source = order[:, count - keep:], order[:, :count - keep]
-    destination = destination.unsqueeze(-1).gather(1, source)
+    with torch.autocast(device_type=tokens.device.type, enabled=False):
+        metric = F.normalize(metric.float(), dim=-1)
+        similarity = metric[:, ::2] @ metric[:, 1::2].transpose(1, 2)
+        best, destination = similarity.max(dim=-1)
+        order = best.argsort(dim=-1, descending=True).unsqueeze(-1)
+        unmerged, source = order[:, count - keep:], order[:, :count - keep]
+        destination = destination.unsqueeze(-1).gather(1, source)
 
-    weighted = tokens.float() * sizes.float()
-    a, b = weighted[:, ::2], weighted[:, 1::2]
-    sa, sb = sizes.float()[:, ::2], sizes.float()[:, 1::2]
-    b = b.scatter_add(1, destination.expand(-1, -1, dim),
-                      a.gather(1, source.expand(-1, -1, dim)))
-    sb = sb.scatter_add(1, destination, sa.gather(1, source))
-    weighted = torch.cat((a.gather(1, unmerged.expand(-1, -1, dim)), b), dim=1)
-    mass = torch.cat((sa.gather(1, unmerged), sb), dim=1)
-    return (weighted / mass).to(tokens.dtype), mass.to(sizes.dtype)
+        weighted = tokens.float() * sizes.float()
+        a, b = weighted[:, ::2], weighted[:, 1::2]
+        sa, sb = sizes.float()[:, ::2], sizes.float()[:, 1::2]
+        b = b.scatter_add(1, destination.expand(-1, -1, dim),
+                          a.gather(1, source.expand(-1, -1, dim)))
+        sb = sb.scatter_add(1, destination, sa.gather(1, source))
+        weighted = torch.cat((a.gather(1, unmerged.expand(-1, -1, dim)), b), dim=1)
+        mass = torch.cat((sa.gather(1, unmerged), sb), dim=1)
+        return (weighted / mass).to(tokens.dtype), mass.to(sizes.dtype)
 
 
 @torch.no_grad()

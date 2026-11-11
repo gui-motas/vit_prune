@@ -255,3 +255,52 @@ def test_bipartite_merge_rejects_mismatched_shapes():
         bipartite_merge(tokens, torch.ones(1, 7, 1), torch.randn(1, 8, 4), 6)
     with pytest.raises(ValueError, match="metric"):
         bipartite_merge(tokens, torch.ones(1, 8, 1), torch.randn(1, 7, 4), 6)
+
+
+def test_bipartite_merge_autocast_preserves_float32_matching():
+    from vitprune.core.merging import bipartite_merge
+
+    tokens = torch.tensor([[[2.], [4.], [8.], [16.]]])
+    sizes = torch.ones(1, 4, 1)
+    metric = torch.tensor([[[1., 0.001], [1., 0.], [0., 1.], [1., 0.001]]])
+    expected = bipartite_merge(tokens, sizes, metric, 3)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        actual = bipartite_merge(tokens, sizes, metric, 3)
+    for result, reference in zip(actual, expected, strict=True):
+        assert torch.equal(result, reference)
+
+
+@pytest.mark.parametrize("count", [9, 10])
+def test_bipartite_merge_matches_brute_force(count):
+    from vitprune.core.merging import bipartite_merge
+
+    generator = torch.Generator().manual_seed(count)
+    tokens = torch.randn(3, count, 4, generator=generator)
+    sizes = torch.rand(3, count, 1, generator=generator) + 0.1
+    metric = torch.randn(3, count, 5, generator=generator)
+    keep = count - 3
+    expected_tokens, expected_sizes = [], []
+    for x, mass, keys in zip(tokens, sizes, metric, strict=True):
+        edges = []
+        all_similarities = []
+        for a in range(0, count, 2):
+            similarities = [torch.nn.functional.cosine_similarity(keys[a], keys[b], dim=0).item()
+                            for b in range(1, count, 2)]
+            all_similarities.extend(similarities)
+            best_b = max(range(len(similarities)), key=similarities.__getitem__)
+            edges.append((similarities[best_b], a, 2 * best_b + 1))
+        edges.sort(reverse=True)
+        assert len(set(all_similarities)) == len(all_similarities)
+        weighted = [x[b] * mass[b] for b in range(1, count, 2)]
+        totals = [mass[b].clone() for b in range(1, count, 2)]
+        for _, a, b in edges[:count - keep]:
+            weighted[b // 2] += x[a] * mass[a]
+            totals[b // 2] += mass[a]
+        unmerged = [a for _, a, _ in edges[count - keep:]]
+        expected_tokens.append(torch.stack([x[a] for a in unmerged]
+                                           + [w / s for w, s in zip(weighted, totals,
+                                                                    strict=True)]))
+        expected_sizes.append(torch.stack([mass[a] for a in unmerged] + totals))
+    actual_tokens, actual_sizes = bipartite_merge(tokens, sizes, metric, keep)
+    torch.testing.assert_close(actual_tokens, torch.stack(expected_tokens), atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(actual_sizes, torch.stack(expected_sizes), atol=1e-6, rtol=1e-6)
