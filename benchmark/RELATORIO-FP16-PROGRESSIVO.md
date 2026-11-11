@@ -103,7 +103,38 @@ O cronograma foi registrado no adendo da spec antes de qualquer AMA com P. Pela 
 
 ### 2.1 Execução A — FP32, atenção original
 
-_(pendente)_
+**Controle:** o código novo reproduz o FP32 salvo (`motion/u896-r1`):
+- o denso fica idêntico bit a bit;
+- o U-1024 fica com features a até 5,3e-5 e probabilidades a até 1,1e-5, sem nenhuma troca de status.
+
+**Interrupção:** a execução foi pausada a pedido depois do 2º vídeo e retomada no 3º (`resume.sh`).
+Ela começou no commit `f4c7578` (`a/commit-start.txt`) e terminou no `64d3453`. Entre os dois, o código
+só muda em FP32 a procedência e os relatórios.
+
+| Braço | Recuperadas | FP | mAP médio | p50 s/clipe\* |
+|---|---:|---:|---:|---:|
+| Denso | 48/48 | 2 | 1,000 | 2,287 |
+| U-1024 | 46/48 | 4 | 0,977 | 1,056 |
+| **P 1536→1024→768** | **46/48** | **2** | **0,990** | **1,084** |
+
+\* `seconds` do `clips.jsonl`, com a ordem girando por batch. A latência de referência está no §3.
+
+- **Perdas:** P perde as mesmas 2 ações que o U-1024: 13522_7 classe 5 e 31903_7 classe 6.
+- **FPs:** P tem 2, como o denso. Some os FPs de classe 12 e de classe 9 do U-1024.
+- **Nas 46 ações em comum:**
+
+  | | Denso | U | P |
+  |---|---:|---:|---:|
+  | Score médio | 0,844 | 0,792 | 0,797 |
+  | Erro de início | 0,60 s | 0,71 s | 0,57 s |
+  | Erro de fim | 0,66 s | 0,66 s | 0,63 s |
+
+  - Na diferença pareada de score P − U, a mediana é −0,001, e P fica maior em 20 de 46: não há
+    deslocamento sistemático.
+- **Ação frágil 13522_7, classe 6:** U 0,305 (a 0,005 do corte), contra P 0,526.
+- **Ação 33682_5, classe 8:** U 0,745, P 0,839 e denso 0,844.
+- **A e B2 concordam no status de todas as 48 ações**, para P e para U. Em P, o score varia até 0,049
+  entre FP32 e FP16.
 
 ### 2.2 Execução B2 — FP16+SDPA (mesmo cronograma)
 
@@ -135,8 +166,13 @@ _(pendente)_
 
 | Modo | Denso | U-1024 | P | P / U |
 |---|---:|---:|---:|---:|
-| FP32 + atenção original | _(pendente)_ | 1.088,9 | 1.120,0 | 1,029 |
+| FP32 + atenção original | 2.033,7 | 935,8 | 963,8 | 1,030 |
 | FP16 + SDPA (Flash) | 355,2 | 169,1 | 163,3 | 0,966 |
+
+- A linha FP32 vem de `latency-fp32/`, medida depois da execução A.
+- A medição de congelamento (`latency-fp32-try1/`, outra sessão) deu U 1.088,9 e P 1.120,0 ms. Os
+  valores absolutos mudaram entre as sessões, mas a razão ficou estável (1,029).
+- O p95 fica a menos de 0,5% do p50 em todos os braços.
 
 O custo relativo das fusões muda entre os modos. Em FP32, P fica 3% mais lento que o U-1024. Em
 FP16+SDPA, fica 3% mais rápido. Isso não foi decomposto. Uma hipótese é que, com a atenção fundida, o
@@ -144,4 +180,45 @@ custo fixo por token dos blocos 3–10 pese menos frente à economia dos 768 tok
 
 ## 4. Leitura
 
-_(pendente da execução A)_
+Fronteira custo × qualidade nos 3 vídeos de dev, com latência do §3 e speedup contra o denso FP32:
+
+| Ponto de operação | ms/clipe | Speedup | Recuperadas | FP | mAP |
+|---|---:|---:|---:|---:|---:|
+| Denso FP32 (atual) | 2.034 | 1,0× | 48/48 | 2 | 1,000 |
+| U-1024 FP32 (melhor ponto anterior) | 936 | 2,2× | 46/48 | 4 | 0,977 |
+| P FP32 | 964 | 2,1× | 46/48 | 2 | 0,990 |
+| **Denso FP16+SDPA** | **355** | **5,7×** | **48/48** | **2** | **1,000** |
+| U-1024 FP16+SDPA | 169 | 12,0× | 46/48 | 4 | 0,977 |
+| **P FP16+SDPA** | **163** | **12,5×** | **46/48** | **2** | **0,990** |
+
+1. **FP16 + SDPA é a melhoria dominante.**
+   - **O denso** fica 5,7× mais rápido sem nenhuma mudança na tarefa: as mesmas 48 ações, os mesmos 2 FPs
+     e scores a até 0,0003.
+   - **Contra o melhor ponto anterior:** o denso FP16+SDPA é 2,6× mais rápido que o U-1024 FP32 e não
+     perde as 2 ações que ele perde.
+   - **Com a poda por cima,** o ganho cai pela metade de novo (~2,1×), com a mesma perda de 2 ações que
+     a poda já tinha em FP32.
+2. **A fusão progressiva melhora pouco, mas de forma consistente nos dois modos, sem mudar o custo**
+   (+3% em FP32, −3,5% em FP16).
+   - **O que melhora:** cai o FP extra do U-1024 (4 → 2, como o denso), o mAP sobe (0,977 → 0,990), o
+     erro de início volta ao nível do denso, e a única ação recuperada por um fio (0,305) sobe para
+     ~0,5.
+   - **O que não muda:** as 2 ações sutis perdidas a ~1.024 tokens. O score pareado não tem
+     deslocamento sistemático.
+   - **Peso da evidência:** com 48 ações e o mAP saturado, a diferença é de 2 detecções e não é
+     significância estatística.
+3. **Recomendação:**
+   - **Ponto padrão:** FP16+SDPA, que custa zero na tarefa.
+   - **Para ~2× a mais:** P no lugar do U-1024, que é mais limpo em FPs pelo mesmo custo.
+4. **Próximos passos,** que dependem do responsável:
+   - **Holdout:** confirmar o denso FP16+SDPA e P/U em FP16 nos motoristas 35418 e 36305, com uma box
+     sem sobreposição.
+   - **Cronograma mais agressivo em FP16:** por exemplo, terminar em 512. O ganho absoluto restante é
+     pequeno (~165 → ~145 ms por clipe, pela conta de tokens por bloco), contra o risco de perder mais ações.
+   - **`torch.compile`/TensorRT:** não foram explorados.
+
+**Limites:**
+- os vídeos de dev estão no treino do AMA;
+- a box foi calibrada nesses motoristas;
+- n = 48 ações em 3 vídeos;
+- BF16, TF32 e outros cronogramas ficaram fora.
