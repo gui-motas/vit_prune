@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vitprune.core.encoder import PrunedEncoder, PruningPlan
+from vitprune.core.policy import FixedBudget
 from vitprune.core.priors import top_rows_prior
 from vitprune.core.testing import reference_backbone, reference_encode, reference_geometry
 
@@ -123,6 +124,36 @@ def test_the_size_bias_affects_the_pruned_path(backbone, geometry, clips, pruned
     a = PrunedEncoder(backbone, geometry, pruned()).encode(clips)
     b = PrunedEncoder(backbone, geometry, pruned(size_biased_attention=True)).encode(clips)
     assert not torch.allclose(a, b, atol=1e-8)
+
+
+@pytest.mark.parametrize("budget", [None, FixedBudget(16)])
+def test_sdpa_attention_matches_model_attention(backbone, geometry, clips, budget):
+    model = PruningPlan(prune_layer=2, budget=budget)
+    sdpa = PruningPlan(prune_layer=2, budget=budget, attention="sdpa")
+    expected = PrunedEncoder(backbone, geometry, model).encode(clips)
+    actual = PrunedEncoder(backbone, geometry, sdpa).encode(clips)
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+    assert "SDPA attention" in sdpa.describe()
+
+
+def test_attention_rejects_unknown_value():
+    with pytest.raises(ValueError, match="attention"):
+        PruningPlan(attention="flash")
+
+
+def test_dense_plan_accepts_attention():
+    plan = PruningPlan.dense(attention="sdpa")
+    assert plan.attention == "sdpa"
+    assert not plan.prunes
+    assert "SDPA attention" in plan.describe()
+
+
+@pytest.mark.parametrize("index", [0, -1])
+def test_sdpa_requires_block_attributes(geometry, index):
+    backbone = reference_backbone(geometry)
+    backbone.blocks[index].attn.qkv = None
+    with pytest.raises(ValueError, match="attention.qkv"):
+        PrunedEncoder(backbone, geometry, PruningPlan.dense(attention="sdpa"))
 
 
 def test_an_incompatible_geometry_fails_with_a_useful_message(backbone, clips):

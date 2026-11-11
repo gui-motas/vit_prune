@@ -66,6 +66,7 @@ class PruningPlan:
         spatial_prior: per-position multiplier, or ``None``.
         size_biased_attention: enables the proportional attention described in
             :mod:`vitprune.core.attention`. Experimental.
+        attention: use the backbone's own attention or the explicit SDPA path.
         budget: what decides how many tokens each clip keeps: an adaptive policy, a
             quality-aware one, or a fixed budget. Without one, nothing is pruned; the cut
             still marks where clip statistics are measured, which is what calibration
@@ -78,6 +79,7 @@ class PruningPlan:
     spatial_prior: torch.Tensor | None = None
     size_biased_attention: bool = False
     budget: BudgetPolicy | QualityAwareBudgetPolicy | FixedBudget | None = None
+    attention: str = "model"
 
     def __post_init__(self) -> None:
         validate_prune_layer(self.prune_layer)
@@ -91,6 +93,8 @@ class PruningPlan:
                              "the first slice without a score")
         if not isinstance(self.size_biased_attention, bool):
             raise ValueError("size_biased_attention must be a bool")
+        if self.attention not in ("model", "sdpa"):
+            raise ValueError("attention must be 'model' or 'sdpa'")
         if self.spatial_prior is not None:
             prior = self.spatial_prior
             if not isinstance(prior, torch.Tensor) or prior.ndim != 1:
@@ -126,22 +130,23 @@ class PruningPlan:
             self.budget.validate_for(geometry)
 
     @classmethod
-    def dense(cls) -> PruningPlan:
+    def dense(cls, attention: str = "model") -> PruningPlan:
         """A plan that prunes nothing.
 
         The baseline for every comparison, and the sanity check: with this plan the
         result has to match the backbone's own forward pass exactly.
         """
-        return cls(prune_layer=0)
+        return cls(prune_layer=0, attention=attention)
 
     @property
     def prunes(self) -> bool:
         return self.budget is not None
 
     def describe(self) -> str:
+        attention = ", SDPA attention" if self.attention == "sdpa" else ""
         if not self.prunes:
-            return "no pruning (dense baseline)"
-        extra = ", size-biased attention" if self.size_biased_attention else ""
+            return "no pruning (dense baseline)" + attention
+        extra = attention + (", size-biased attention" if self.size_biased_attention else "")
         if self.spatial_prior is not None:
             extra += ", spatial prior"
         levels = "/".join(str(level) for level in self.budget.levels)
@@ -470,20 +475,22 @@ class PrunedEncoder(nn.Module):
         for block in blocks:
             if not callable(block):
                 raise ValueError("each backbone block must be callable")
-        if self.plan.prunes and self.plan.size_biased_attention:
-            for block in list(blocks)[self.plan.prune_layer :]:
+        if self.plan.attention == "sdpa" or (self.plan.prunes and self.plan.size_biased_attention):
+            start = 0 if self.plan.attention == "sdpa" else self.plan.prune_layer
+            reason = "SDPA attention" if self.plan.attention == "sdpa" else "size-biased attention"
+            for block in list(blocks)[start:]:
                 for name in ("norm1", "norm2", "mlp", "attn"):
                     if not callable(getattr(block, name, None)):
-                        raise ValueError(f"size-biased attention requires block.{name}")
+                        raise ValueError(f"{reason} requires block.{name}")
                 attention = block.attn
                 for name in ("qkv", "proj"):
                     if not callable(getattr(attention, name, None)):
-                        raise ValueError(f"size-biased attention requires attention.{name}")
+                        raise ValueError(f"{reason} requires attention.{name}")
                 if (
                     not isinstance(getattr(attention, "num_heads", None), int)
                     or attention.num_heads <= 0
                 ):
-                    raise ValueError("size-biased attention requires attention.num_heads")
+                    raise ValueError(f"{reason} requires attention.num_heads")
                 if self.geometry.embed_dim % attention.num_heads:
                     raise ValueError("attention.num_heads must divide geometry.embed_dim")
 
@@ -520,9 +527,12 @@ class PrunedEncoder(nn.Module):
         return out
 
     def _run(self, block, tokens, sizes):
-        if not (self.plan.size_biased_attention and sizes is not None):
+        biased = self.plan.size_biased_attention and sizes is not None
+        if self.plan.attention != "sdpa" and not biased:
             return block(tokens)
-        log_sizes = torch.log(sizes.reshape(tokens.shape[0], -1).clamp(min=1e-6))
+        log_sizes = None
+        if biased:
+            log_sizes = torch.log(sizes.reshape(tokens.shape[0], -1).clamp(min=1e-6))
         return run_block(block, tokens, log_sizes)
 
     def _as_grid(self, tokens: torch.Tensor, per_slice: int) -> torch.Tensor:
