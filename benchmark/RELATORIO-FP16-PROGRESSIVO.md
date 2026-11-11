@@ -222,3 +222,17 @@ Fronteira custo × qualidade nos 3 vídeos de dev, com latência do §3 e speedu
 - a box foi calibrada nesses motoristas;
 - n = 48 ações em 3 vídeos;
 - BF16, TF32 e outros cronogramas ficaram fora.
+
+## 5. Candidatos registrados
+
+**Status:** candidatos no conjunto de dev. Ainda falta confirmar no holdout (35418, 36305), com uma box
+sem sobreposição.
+
+| Prioridade | Candidato | Configuração | Medido no dev |
+|---|---|---|---|
+| **Preservar a qualidade** | Denso FP16 + SDPA | `--precision fp16 --attention sdpa`, sem poda (`PruningPlan.dense(attention="sdpa")` sob `autocast` fp16) | 355 ms/clipe (5,7×); 48/48 ações, 2 FP, mAP 1,000; idêntico ao denso FP32 na tarefa |
+| **Latência** | Progressivo FP16 + SDPA | `--precision fp16 --attention sdpa --progressive 1536 10:1024 20:768` com a box (`PruningPlan(prune_layer=2, budget=FixedBudget(1536), spatial_prior=box, stages=((10, 1024), (20, 768)), attention="sdpa")`) | 163 ms/clipe (12,5×); 46/48 ações, 2 FP, mAP 0,990; perde 13522_7 classe 5 e 31903_7 classe 6 |
+
+O denso FP16+SDPA continua sendo a referência de qualidade para o candidato de latência. O U-1024 fica
+como linha de base de comparação, não como candidato: com o mesmo custo, ele tem 2 FPs a mais que o
+progressivo.
