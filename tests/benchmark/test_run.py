@@ -92,6 +92,11 @@ def test_the_run_writes_what_the_next_steps_read(bench, model, geometry):
             assert stored["feats"].shape == (clips, geometry.embed_dim)
             assert stored["a_prob"].shape == (clips, 3)
         assert (bench.features / variant / MANIFEST_NAME).exists()
+        manifest = json.loads((bench.features / variant / MANIFEST_NAME).read_text("utf-8"))
+        assert manifest["settings"]["region"] == (
+            str(bench.region) if variant == "vitprune_mascara_inteligente" else None)
+        if variant == "vitprune_mascara_fixa":
+            assert manifest["settings"]["fixed_mask"] == bench.fixed_mask
     record = json.loads(bench.record.read_text("utf-8"))
     video = {"fps": float(FPS), "frames": FPS * SECONDS, "clips": clips}
     assert record["schedules"] == {"v": video}
@@ -303,11 +308,26 @@ def test_a_masked_budget_keeps_its_tokens_inside_the_driver_region(bench, model,
     inference.run_benchmark(bench)
 
     assert {r["variant"] for r in _rows(bench)} == {"denso", "fixo_32_mascara"}
+    manifest = json.loads((bench.features / "fixo_32_mascara" / MANIFEST_NAME).read_text("utf-8"))
+    assert manifest["settings"]["region"] == str(bench.region)
     assert json.loads(bench.record.read_text("utf-8"))["settings"]["masked"] == [32]
     region = read_region(bench.region, geometry)
     encoder = inference.encoders(bench, model, {}, region)["fixo_32_mascara"]
     kept = encoder.select(torch.randn(*geometry.input_shape(batch=2))).kept
     assert region[kept].all()  # 8 a slice, all among the 12 positions of the region
+
+
+def test_manifest_records_the_driver_region_for_fixo_1024(bench):
+    from types import SimpleNamespace
+
+    from vitprune.core import FixedBudget, PruningPlan
+
+    bench.out.mkdir(parents=True)
+    bench.clips.write_text("", encoding="utf-8")
+    plan = PruningPlan(budget=FixedBudget(1024), spatial_prior=torch.ones(16))
+    inference.write_manifests(bench, [], {"fixo_1024_mascara": SimpleNamespace(plan=plan)})
+    path = bench.features / "fixo_1024_mascara" / MANIFEST_NAME
+    assert json.loads(path.read_text("utf-8"))["settings"]["region"] == str(bench.region)
 
 
 def test_a_video_an_interruption_cut_is_redone_without_duplicate_rows(bench, model):
@@ -398,6 +418,8 @@ def test_progressive_run_records_settings_and_manifests_and_resumes(bench, model
         manifest = json.loads((bench.features / variant / MANIFEST_NAME).read_text("utf-8"))
         assert manifest["settings"]["attention"] == "sdpa"
         assert manifest["settings"]["stages"] == stages
+        assert manifest["settings"]["region"] == (
+            str(bench.region) if variant.startswith("prog_") else None)
     assert {row["variant"] for row in _rows(bench)} == {"denso", "prog_32_24_mascara"}
     inference.run_benchmark(bench)
     bench.attention = "model"

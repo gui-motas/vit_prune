@@ -181,7 +181,7 @@ def test_policy_variant_names_are_checked(tmp_path):
     study = _benchmark(tmp_path, policies=(("qabp", tmp_path / "q.json"),), fixed=(1024,))
     assert study.variants == ("denso", "legacy_original", "qabp", "fixo_1024")
     assert _benchmark(tmp_path).variants == VARIANTS  # the mask study, unchanged
-    for name in ("denso", "legacy_original", "fixo_1", "Upper", "a-b", ""):
+    for name in ("denso", "legacy_original", "fixo_1", "prog_custom", "Upper", "a-b", ""):
         with pytest.raises(ValueError):
             _benchmark(tmp_path, policies=((name, tmp_path / "q.json"),))
     with pytest.raises(ValueError):
@@ -205,6 +205,7 @@ def test_the_policies_come_from_name_equals_path(tmp_path, monkeypatch):
     assert seen[0].policies == (("qabp", Path("q.json")), ("legacy_recalibrada", Path("l.json")))
     assert seen[0].fixed == (1024, 1536)
     assert main(_run_command(tmp_path, "--policies", "qabp")) == 2  # NAME=PATH or nothing
+    assert main(_run_command(tmp_path, "--policies", "prog_1536_1024_mascara=p.json")) == 2
 
 
 def test_the_policy_study_adds_proportional_attention_and_needs_no_legacy_policy(tmp_path):

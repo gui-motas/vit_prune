@@ -364,8 +364,11 @@ def test_a_progressive_variant_can_be_reported(tmp_path):
         path = out / file
         path.write_text(path.read_text("utf-8").replace("fixo_32_pa", variant), "utf-8")
     book = pd.ExcelFile(report.make_report(out))
-    assert "ViT-Prune progressivo 32→24 + máscara do motorista" in (
-        book.parse("Resumo")["Variante"].tolist())
+    summary = book.parse("Resumo").set_index("Variante")
+    progressive = summary.loc["ViT-Prune progressivo 32→24 + máscara do motorista"]
+    assert pd.isna(progressive["Speedup previsto"])
+    assert progressive["Speedup medido"] == pytest.approx(2.0)
+    assert summary.loc["ViT-Prune fixo 32 tokens", "Speedup previsto"] > 1
 
 
 def test_boundaries_and_confidence_are_compared_on_the_actions_both_runs_find(tmp_path):

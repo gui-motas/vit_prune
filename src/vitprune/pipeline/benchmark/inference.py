@@ -320,8 +320,8 @@ def write_manifests(bench: Benchmark, videos: list[Path], runners: dict) -> None
                       "precision": bench.precision, "device": bench.device,
                       "geometry": asdict(GEOMETRY),
                       "fixed_mask": bench.fixed_mask if name == "vitprune_mascara_fixa" else None,
-                      "region": str(bench.region) if name == "vitprune_mascara_inteligente"
-                      else None},
+                      "region": (str(bench.region) if plan.spatial_prior is not None
+                                 and name != "vitprune_mascara_fixa" else None)},
             outputs=outputs,
         ).write(bench.features / name)
 

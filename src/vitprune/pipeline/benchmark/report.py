@@ -418,7 +418,8 @@ def summary(record: RunRecord, frame: pd.DataFrame, probabilities: dict,
         if "rel_l2_to_dense" in rows:
             row["L2 relativo médio com o denso"] = rows["rel_l2_to_dense"].mean()
         row |= {
-            "Speedup previsto": budget_cost(GEOMETRY, tokens, layer).predicted_speedup,
+            "Speedup previsto": (None if variant.startswith("prog_") else
+                                 budget_cost(GEOMETRY, tokens, layer).predicted_speedup),
             "Speedup medido": dense_seconds / rows["seconds"].mean(),
             "Tempo médio por clipe (s)": rows["seconds"].mean(),
             "Tempo p50 por clipe (s)": rows["seconds"].median(),

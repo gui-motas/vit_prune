@@ -117,14 +117,12 @@ class Benchmark:
                         stages=self.progressive[1:]).validate_for(GEOMETRY)
         names = [name for name, _ in self.policies]
         for name in names:
-            fixed = name.startswith("fixo_")
-            if not re.fullmatch(r"[a-z0-9_]+", name) or name in RESERVED or fixed:
+            generated = name.startswith(("fixo_", "prog_"))
+            if not re.fullmatch(r"[a-z0-9_]+", name) or name in RESERVED or generated:
                 raise ValueError(f"a policy variant needs a name of a-z, 0-9 and _, not one of "
-                                 f"{RESERVED} nor fixo_*: got {name!r}")
+                                 f"{RESERVED} nor fixo_* or prog_*: got {name!r}")
         if len(set(names)) != len(names):
             raise ValueError(f"policy variant names must be unique, got {names}")
-        if self.progressive and self.progressive_name in names:
-            raise ValueError("a policy variant conflicts with the progressive variant")
         for levels in (self.fixed, self.proportional, self.masked):
             if len(set(levels)) != len(levels):
                 raise ValueError(f"fixed budgets must be unique, got {levels}")
