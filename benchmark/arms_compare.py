@@ -6,7 +6,6 @@ import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from vitprune.pipeline.benchmark import report
@@ -14,30 +13,25 @@ from vitprune.pipeline.benchmark.settings import RunRecord
 
 
 def action_table(gt: pd.DataFrame, detections: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    gt = gt.reset_index(drop=True)
+    matches = {}
+    for arm, found in detections.items():
+        eligible = found[found["score"] >= report.MIN_SCORE].reset_index(drop=True)
+        best, where = report._best(gt, eligible)
+        matches[arm] = eligible, best, where
     rows = []
-    for action_id, action in gt.reset_index(drop=True).iterrows():
-        for arm, found in detections.items():
-            same = found[(found["video-id"] == action["video-id"])
-                         & (found["label"] == action["label"])].copy()
-            inter = (np.minimum(same["t-end"], action["t-end"])
-                     - np.maximum(same["t-start"], action["t-start"])).clip(lower=0)
-            union = (np.maximum(same["t-end"], action["t-end"])
-                     - np.minimum(same["t-start"], action["t-start"]))
-            same["tiou"] = np.divide(inter, union, out=np.zeros(len(inter)), where=union > 0)
-            qualified = same[same["tiou"] >= report.TIOU]
-            fallback = qualified.empty
-            candidates = same[same["tiou"] > 0] if fallback else qualified
-            picked = None if candidates.empty else candidates.loc[candidates["score"].idxmax()]
+    for action_id, action in gt.iterrows():
+        for arm, (eligible, best, where) in matches.items():
+            overlap = best[action_id]
+            picked = eligible.iloc[where[action_id]] if overlap > 0 else None
             rows.append({"action": action_id, "arm": arm, **action.to_dict(),
-                         "recovered": bool(picked is not None and not fallback
-                                           and picked["score"] >= report.MIN_SCORE),
+                         "recovered": bool(overlap >= report.TIOU),
                          "score": None if picked is None else float(picked["score"]),
-                         "tiou": None if picked is None else float(picked["tiou"]),
+                         "tiou": float(overlap),
                          "start_err": None if picked is None else
                          float(picked["t-start"] - action["t-start"]),
                          "end_err": None if picked is None else
-                         float(picked["t-end"] - action["t-end"]),
-                         "fallback": bool(fallback and picked is not None)})
+                         float(picked["t-end"] - action["t-end"])})
     return pd.DataFrame(rows)
 
 
@@ -77,7 +71,7 @@ def markdown(result: dict) -> str:
         lines.append(f"| {name} | {row['recovered']} | {row['lost']} | {row['false_positives']} "
                      f"| {row['map']:.4f} | {t['p50']:.4f} | {t['p95']:.4f} "
                      f"| {t['mean']:.4f} |")
-    lines += ["", "## Actions", "", "* marks a same-class overlap below the tIoU threshold.", "",
+    lines += ["", "## Actions", "", "Signed start/end errors are prediction minus annotation.", "",
               "| Video | Class | Start | End | " + " | ".join(arms) + " |",
               "|---|---:|---:|---:|" + "---|" * len(arms)]
     for action in actions:
@@ -85,8 +79,8 @@ def markdown(result: dict) -> str:
         for name in arms:
             row = action["arms"][name]
             mark = "✓" if row["recovered"] else "✗"
-            cells.append(f"{mark} {row['score']:.2f} ({row['tiou']:.2f})"
-                         + ("*" if row["fallback"] else "")
+            cells.append(f"{mark} {row['score']:.2f} ({row['tiou']:.2f}) "
+                         f"{row['start_err']:+.1f}/{row['end_err']:+.1f}s"
                          if row["score"] is not None else f"{mark} —")
         lines.append(f"| {action['video-id']} | {action['label']} | {action['t-start']:.2f} "
                      f"| {action['t-end']:.2f} | " + " | ".join(cells) + " |")
@@ -142,7 +136,7 @@ def main() -> None:
     for action_id, action in truth.iterrows():
         status = table[table["action"] == action_id]
         actions.append(action.to_dict() | {"arms": {row["arm"]: {k: row[k] for k in
-                       ("recovered", "score", "tiou", "start_err", "end_err", "fallback")}
+                       ("recovered", "score", "tiou", "start_err", "end_err")}
                        for row in records(status)}})
     result = {"arms": arms, "actions": actions}
     args.out.parent.mkdir(parents=True, exist_ok=True)

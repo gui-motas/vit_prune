@@ -51,13 +51,14 @@ def sample_batches(bench):
     batches, manifest = [], []
     for video in bench.evaluated():
         groups = sample_starts(bench.clip_starts(video_info(video)["frames"]))
+        if len(groups) != 2 or any(len(group) != 8 for group in groups):
+            raise ValueError(f"{video.stem}: need two complete scheduled batches of 8 clips")
         by_start = {start: True for group in groups for start in group}
         decoded = dict(iter_clips(video, GEOMETRY, 16, 2, by_start))
         for starts in groups:
             available = [start for start in starts if start in decoded]
             if len(available) != 8:
-                print(f"{video.stem}: skipped incomplete batch ({len(available)}/8)", flush=True)
-                continue
+                raise ValueError(f"{video.stem}: incomplete decoded batch ({len(available)}/8)")
             batches.append(torch.stack([decoded[start] for start in available]))
             manifest.append({"video": video.stem, "starts": available})
         count = sum(m["video"] == video.stem for m in manifest)
@@ -138,8 +139,9 @@ def main():
                     encoder.encode(x)
                 torch.cuda.synchronize()
             kernels[name] = sorted({event.key for event in prof.key_averages()
-                                    if re.search(r"flash|fmha|efficient|attention|softmax|cutlass",
-                                                 event.key, re.IGNORECASE)})
+                                    if event.device_type == torch.autograd.DeviceType.CUDA
+                                    and re.search(r"flash|fmha|efficient|attention|softmax|cutlass",
+                                                  event.key, re.IGNORECASE)})
             print(f"{name} profiler: {kernels[name]}", flush=True)
     p10 = results["denso/fp16_sdpa"]["cosine_p10"]
     passed = all(row["finite"] for row in results.values()) and p10 is not None and p10 >= .999

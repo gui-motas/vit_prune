@@ -23,13 +23,13 @@ def frame(rows):
     return pd.DataFrame(rows, columns=["video-id", "t-start", "t-end", "label", "score"])
 
 
-def test_actions_choose_highest_score_at_threshold_and_flag_fallback():
+def test_actions_match_best_tiou_above_score_threshold():
     compare = load("arms_compare")
     actions = frame([["v", 0, 10, 1, 1], ["v", 20, 30, 2, 1],
                      ["v", 40, 50, 3, 1]])
     detections = {
         "a": frame([["v", 0, 6, 1, .31], ["v", 20, 30, 2, .29],
-                    ["v", 40, 44, 3, .7], ["v", 0, 10, 9, .8]]),
+                    ["v", 40, 44, 3, .7], ["v", 40, 50, 3, .29], ["v", 0, 10, 9, .8]]),
         "b": frame([["v", 0, 10, 1, .3], ["v", 1, 9, 1, .84],
                     ["v", 40, 50, 9, .9]]),
     }
@@ -39,15 +39,33 @@ def test_actions_choose_highest_score_at_threshold_and_flag_fallback():
     assert rows.loc[(0, "a"), "score"] == .31
     assert rows.loc[(0, "a"), "tiou"] == pytest.approx(.6)
     assert not rows.loc[(1, "a"), "recovered"]
-    assert rows.loc[(1, "a"), "score"] == .29
-    assert not rows.loc[(1, "a"), "fallback"]
+    assert pd.isna(rows.loc[(1, "a"), "score"])
+    assert rows.loc[(1, "a"), "tiou"] == 0
     assert not rows.loc[(2, "a"), "recovered"]
     assert rows.loc[(2, "a"), "tiou"] == pytest.approx(.4)
-    assert rows.loc[(2, "a"), "fallback"]
-    assert rows.loc[(0, "b"), "score"] == .84
-    assert rows.loc[(0, "b"), "start_err"] == 1
-    assert rows.loc[(0, "b"), "end_err"] == -1
+    assert rows.loc[(0, "b"), "score"] == .3
+    assert rows.loc[(0, "b"), "start_err"] == 0
+    assert rows.loc[(0, "b"), "end_err"] == 0
     assert pd.isna(rows.loc[(1, "b"), "score"])
+
+
+def test_competing_detections_choose_best_tiou_not_highest_score():
+    compare = load("arms_compare")
+    actions = frame([["v", 0, 10, 1, 1]])
+    found = frame([["v", 1, 9, 1, .8], ["v", 0, 10, 1, .4]])
+    row = compare.action_table(actions, {"a": found}).iloc[0]
+    assert row["recovered"]
+    assert (row["score"], row["tiou"], row["start_err"], row["end_err"]) == (.4, 1, 0, 0)
+
+
+def test_markdown_action_cell_includes_signed_boundary_errors():
+    compare = load("arms_compare")
+    result = {"arms": {"a": {"latency": {"p50": 1, "p95": 1, "mean": 1}, "map": .5,
+                             "recovered": 1, "lost": 0, "false_positives": 0, "detections": []}},
+              "actions": [{"video-id": "v", "label": 1, "t-start": 0, "t-end": 10,
+                           "arms": {"a": {"recovered": True, "score": .84, "tiou": .91,
+                                          "start_err": -.5, "end_err": 1.2, "fallback": False}}}]}
+    assert "✓ 0.84 (0.91) -0.5/+1.2s" in compare.markdown(result)
 
 
 def test_false_positives_require_score_class_video_and_tiou():
@@ -118,8 +136,8 @@ def test_comparison_cli_reads_real_run_records_and_writes_both_outputs(tmp_path)
     arm = result["arms"]["test/denso"]
     assert (arm["recovered"], arm["lost"], arm["false_positives"], arm["map"]) == (1, 1, 1, .42)
     assert arm["latency"]["p50"] == 2
-    assert result["actions"][1]["arms"]["test/denso"]["score"] == .29
-    assert "✓ 0.31 (0.60)" in out.with_suffix(".md").read_text()
+    assert result["actions"][1]["arms"]["test/denso"]["score"] is None
+    assert "✓ 0.31 (0.60) +0.0/-4.0s" in out.with_suffix(".md").read_text()
 
 
 @pytest.mark.parametrize("issue,gate", [("none", True), ("nan", False), ("drift", False)])
@@ -154,7 +172,10 @@ def test_c2_gate_and_profiler_with_cpu_model(tmp_path, monkeypatch, capsys, issu
             return False
 
         def key_averages(self):
-            return [SimpleNamespace(key="FlashAttention"), SimpleNamespace(key="other")]
+            return [SimpleNamespace(key="FlashAttention",
+                                    device_type=torch.autograd.DeviceType.CUDA),
+                    SimpleNamespace(key="aten::softmax", device_type=torch.autograd.DeviceType.CPU),
+                    SimpleNamespace(key="other", device_type=torch.autograd.DeviceType.CUDA)]
 
     model = SimpleNamespace(head=lambda x: x)
     monkeypatch.setattr(check, "setup", lambda args: (SimpleNamespace(device="cpu"), model, None))
@@ -175,7 +196,7 @@ def test_c2_gate_and_profiler_with_cpu_model(tmp_path, monkeypatch, capsys, issu
     assert "| Configuration |" in output
 
 
-def test_sample_batches_skip_undecodable_clips_without_changing_schedule(monkeypatch, capsys):
+def test_sample_batches_refuses_undecodable_clip(monkeypatch):
     import torch
 
     from vitprune.pipeline import video
@@ -187,11 +208,44 @@ def test_sample_batches_skip_undecodable_clips_without_changing_schedule(monkeyp
     monkeypatch.setattr(inference, "video_info", lambda _: {"frames": 40})
     monkeypatch.setattr(video, "iter_clips", lambda path, geometry, stride, frame_step, starts:
                         ((start, torch.tensor(start)) for start in starts if start != 22))
+    with pytest.raises(ValueError, match=r"v.*incomplete.*7/8"):
+        check.sample_batches(bench)
+
+
+@pytest.mark.parametrize("count", [4, 8, 15])
+def test_sample_batches_refuses_fewer_than_two_complete_scheduled_batches(monkeypatch, count):
+    import torch
+
+    from vitprune.pipeline import video
+    from vitprune.pipeline.benchmark import inference
+
+    check = load("c2_check")
+    bench = SimpleNamespace(evaluated=lambda: [Path("v.mp4")],
+                            clip_starts=lambda _: list(range(count)))
+    monkeypatch.setattr(inference, "video_info", lambda _: {"frames": count})
+    monkeypatch.setattr(video, "iter_clips", lambda path, geometry, stride, frame_step, starts:
+                        ((start, torch.tensor(start)) for start in starts))
+    with pytest.raises(ValueError, match=r"v.*two complete.*8"):
+        check.sample_batches(bench)
+
+
+def test_sample_batches_requires_two_full_batches_per_video(monkeypatch):
+    import torch
+
+    from vitprune.pipeline import video
+    from vitprune.pipeline.benchmark import inference
+
+    check = load("c2_check")
+    videos = [Path(f"v{i}.mp4") for i in range(3)]
+    bench = SimpleNamespace(evaluated=lambda: videos, clip_starts=lambda _: list(range(40)))
+    monkeypatch.setattr(inference, "video_info", lambda _: {"frames": 40})
+    monkeypatch.setattr(video, "iter_clips", lambda path, geometry, stride, frame_step, starts:
+                        ((start, torch.tensor(start)) for start in starts))
     batches, manifest = check.sample_batches(bench)
-    assert len(batches) == 1
-    assert batches[0].tolist() == list(range(8))
-    assert manifest == [{"video": "v", "starts": list(range(8))}]
-    assert "skipped incomplete batch (7/8)" in capsys.readouterr().out
+    assert len(batches) == 6
+    assert sum(len(batch) for batch in batches) == 48
+    assert manifest == [{"video": path.stem, "starts": starts} for path in videos
+                        for starts in (list(range(8)), list(range(16, 24)))]
 
 
 def test_latency_rotates_arms_and_excludes_warmup_on_cpu(tmp_path, monkeypatch):
