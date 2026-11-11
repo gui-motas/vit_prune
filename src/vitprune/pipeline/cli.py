@@ -951,7 +951,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bench_run.add_argument(
         "--progressive", nargs="+", metavar="TOKENS|BLOCK:TOKENS",
-        help="policy study: tokens at the cut followed by later BLOCK:TOKENS merges in the region",
+        help="policy study: tokens at the region-guided cut followed by global ToMe-style "
+             "BLOCK:TOKENS merges across slices; tokens column records the initial count",
     )
     bench_run.add_argument(
         "--allow-region-overlap", action="store_true",

@@ -425,14 +425,18 @@ class PrunedEncoder(nn.Module):
             if keep == self.geometry.tokens_per_slice:
                 group, sizes = part.reshape(count, slices * keep, dim), None
             else:
-                merged = merge_tokens(part, initial_sizes(part), scores[members], keep)
-                group, sizes = merged.tokens.reshape(count, slices * keep, dim), merged.sizes
+                sizes = initial_sizes(part)
+                if self.plan.stages:
+                    sizes = sizes.float()
+                merged = merge_tokens(part, sizes, scores[members], keep)
+                group = merged.tokens.to(part.dtype).reshape(count, slices * keep, dim)
+                sizes = merged.sizes
             stages = dict(self.plan.stages)
             for index, block in enumerate(blocks[cut:], start=cut + 1):
                 group = self._run(block, group, sizes)
                 if index in stages:
                     if sizes is None:
-                        sizes = group.new_ones((*group.shape[:2], 1))
+                        sizes = torch.ones((*group.shape[:2], 1), device=group.device)
                     else:
                         sizes = sizes.reshape(count, -1, 1)
                     group, sizes = bipartite_merge(
@@ -619,6 +623,8 @@ class PrunedEncoder(nn.Module):
         else:
             flat = sizes.reshape(tokens.shape[0], tokens.shape[1], 1)
             embedding = size_weighted_mean(tokens, flat)
+            if self.plan.stages:
+                embedding = embedding.to(tokens.dtype)
 
         final_norm = getattr(self.backbone, "fc_norm", None)
         if final_norm is not None:

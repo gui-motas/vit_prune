@@ -167,6 +167,26 @@ def test_the_report_without_labels_compares_every_variant_with_the_dense(tmp_pat
     assert len(list(figures.glob("selecao-*.png"))) == 2  # clips 0 and 48 of the one video
 
 
+@pytest.mark.parametrize("overlap,allowed,exploratory", [
+    ({"--region": {"videos": [], "drivers": []}}, False, False),
+    ({"--region": {"videos": ["v"], "drivers": []}}, False, True),
+    ({"legacy_original": {"videos": [], "drivers": ["v"]}}, False, True),
+    ({}, True, True),
+])
+def test_mask_workbook_calibration_note_reflects_overlap(tmp_path, overlap, allowed, exploratory):
+    pytest.importorskip("openpyxl")
+    out = _synthetic_run(tmp_path)
+    path = out / "run.json"
+    run = json.loads(path.read_text("utf-8"))
+    run["calibration_overlap"] = overlap
+    run["settings"]["allow_region_overlap"] = allowed
+    path.write_text(json.dumps(run), "utf-8")
+    notes = pd.ExcelFile(report.make_report(out)).parse("Configuração").set_index("Item")["Valor"]
+    note = notes["Nota: calibração"]
+    assert ("explorat" in note) is exploratory
+    assert ("não são avaliados" in note) is not exploratory
+
+
 def test_the_report_without_the_ama_still_writes_the_head_and_time_columns(tmp_path):
     pytest.importorskip("openpyxl")
     out = _synthetic_run(tmp_path, with_ama=False)

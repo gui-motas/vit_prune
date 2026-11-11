@@ -192,6 +192,32 @@ def test_stages_shrink_tokens_after_block(attention):
     assert "stages 3:24 5:12" in plan.describe()
 
 
+def test_bfloat16_encoder_preserves_mass_through_stages_and_pool(monkeypatch):
+    import vitprune.core.encoder as module
+
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry).bfloat16()
+    encoder = PrunedEncoder(backbone, geometry,
+                            PruningPlan(budget=FixedBudget(32), stages=((3, 24), (5, 12))))
+    original_merge, original_pool = module.bipartite_merge, encoder._pool
+    masses = []
+
+    def merge(*args):
+        tokens, sizes = original_merge(*args)
+        masses.append(sizes)
+        return tokens, sizes
+
+    def pool(tokens, sizes):
+        masses.append(sizes)
+        return original_pool(tokens, sizes)
+
+    monkeypatch.setattr(module, "bipartite_merge", merge)
+    monkeypatch.setattr(encoder, "_pool", pool)
+    encoder.encode(torch.randn(*geometry.input_shape()).bfloat16())
+    assert len(masses) == 3
+    assert all(mass.dtype == torch.float32 and mass.sum().item() == 64 for mass in masses)
+
+
 @pytest.mark.parametrize("stages", [
     ((3, 24), (3, 16)), ((4, 24), (3, 16)), ((2, 24),), ((6, 24),),
     ((3, 32),), ((3, 24), (4, 24)), ((3, 24), (4, 25)), ((3, 15),),

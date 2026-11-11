@@ -2,7 +2,8 @@
 
 The run is defined by its command line alone. Its inputs are written to ``run.json`` next
 to the results, so that ``vitprune benchmark ama`` and ``vitprune benchmark report`` need
-only the results folder.
+only the results folder. The policy study includes fixed, masked and progressive variants;
+progressive variants use a region-guided cut followed by global merges.
 """
 
 from __future__ import annotations
@@ -39,10 +40,10 @@ class Benchmark:
     Two studies share the run. The mask study compares the dense VideoMAE with ViT-Prune
     without a mask, with the fixed mask and with the driver region, under ``policy``. The
     policy study, chosen by giving ``policies``, ``fixed``, ``proportional``, ``masked`` or
-    ``progressive``,
-    compares budgets instead: the dense VideoMAE, ``policy`` when given (as
+    ``progressive``, compares budgets instead: the dense VideoMAE, ``policy`` when given (as
     ``legacy_original``), each named policy file, and fixed budgets, plain, with size-biased
-    attention, or selecting inside the driver region. Only the last use a mask.
+    attention, selecting inside the driver region, or progressively merging after a
+    region-guided cut. The last two use a mask.
 
     Args:
         videos: folder of the videos under evaluation; never the calibration videos.

@@ -330,6 +330,23 @@ def test_manifest_records_the_driver_region_for_fixo_1024(bench):
     assert json.loads(path.read_text("utf-8"))["settings"]["region"] == str(bench.region)
 
 
+@pytest.mark.parametrize("variant", ["vitprune_mascara_inteligente", "fixo_1024_mascara",
+                                     "prog_1024_768_mascara"])
+def test_region_manifest_records_hash_and_overlap_opt_in(bench, variant):
+    from types import SimpleNamespace
+
+    from vitprune.core import FixedBudget, PruningPlan
+
+    bench.out.mkdir(parents=True)
+    bench.clips.write_text("", encoding="utf-8")
+    bench.allow_region_overlap = True
+    plan = PruningPlan(budget=FixedBudget(1024), spatial_prior=torch.ones(16))
+    inference.write_manifests(bench, [], {variant: SimpleNamespace(plan=plan)})
+    recorded = json.loads((bench.features / variant / MANIFEST_NAME).read_text("utf-8"))["settings"]
+    assert recorded["region_sha256"] == SourceFile.of(bench.region).sha256
+    assert recorded["region_overlap_allowed"] is True
+
+
 def test_a_video_an_interruption_cut_is_redone_without_duplicate_rows(bench, model):
     bench.policy, bench.fixed = None, (32,)
     inference.run_benchmark(bench)
@@ -430,6 +447,7 @@ def test_progressive_run_records_settings_and_manifests_and_resumes(bench, model
 def test_progressive_region_overlap_requires_opt_in(bench, model, tmp_path, capsys):
     bench.region = _region_from(bench, tmp_path / "leaky.json", {"v": [0.1, 0.2, 0.9, 1.0]})
     bench.policy = None
+    bench.masked = (32,)
     bench.progressive = ((2, 32), (3, 24))
     with pytest.raises(ValueError, match="region"):
         inference.run_benchmark(bench)
@@ -439,6 +457,10 @@ def test_progressive_region_overlap_requires_opt_in(bench, model, tmp_path, caps
     record = json.loads(bench.record.read_text("utf-8"))
     assert record["settings"]["allow_region_overlap"] is True
     assert record["calibration_overlap"]["--region"]["videos"] == ["v"]
+    for variant in ("fixo_32_mascara", "prog_32_24_mascara"):
+        manifest = json.loads((bench.features / variant / MANIFEST_NAME).read_text("utf-8"))
+        assert manifest["settings"]["region_sha256"] == SourceFile.of(bench.region).sha256
+        assert manifest["settings"]["region_overlap_allowed"] is True
 
 
 def test_allowing_region_overlap_still_refuses_a_tainted_quality_policy(bench, tmp_path):

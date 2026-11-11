@@ -233,7 +233,7 @@ def test_bipartite_merge_refuses_more_than_half(keep):
         bipartite_merge(torch.randn(1, 8, 3), torch.ones(1, 8, 1), torch.randn(1, 8, 4), keep)
 
 
-def test_bipartite_merge_low_precision_returns_input_dtype():
+def test_bipartite_merge_low_precision_keeps_float32_mass():
     from vitprune.core.merging import bipartite_merge
 
     torch.manual_seed(5)
@@ -241,10 +241,29 @@ def test_bipartite_merge_low_precision_returns_input_dtype():
     sizes = (torch.rand(2, 12, 1) + 0.2).bfloat16()
     metric = torch.randn(2, 12, 3).bfloat16()
     merged, mass = bipartite_merge(tokens, sizes, metric, 8)
-    assert merged.dtype == tokens.dtype and mass.dtype == sizes.dtype
+    assert merged.dtype == tokens.dtype and mass.dtype == torch.float32
     torch.testing.assert_close(size_weighted_mean(merged.float(), mass.float()),
                                size_weighted_mean(tokens.float(), sizes.float()),
                                atol=1e-2, rtol=1e-2)
+
+
+def test_bipartite_merge_concentrated_bfloat16_mass_is_exact():
+    from vitprune.core.merging import bipartite_merge
+
+    tokens = torch.ones(1, 512, 2, dtype=torch.bfloat16)
+    sizes = torch.ones(1, 512, 1, dtype=torch.bfloat16)
+    _, mass = bipartite_merge(tokens, sizes, tokens, 256)
+    assert mass.dtype == torch.float32
+    assert mass.sum().item() == 512
+    assert mass.max().item() == 257
+
+
+def test_bipartite_merge_keep_all_promotes_mass():
+    from vitprune.core.merging import bipartite_merge
+
+    tokens = torch.ones(1, 4, 2, dtype=torch.bfloat16)
+    _, mass = bipartite_merge(tokens, torch.ones(1, 4, 1, dtype=torch.bfloat16), tokens, 4)
+    assert mass.dtype == torch.float32
 
 
 def test_bipartite_merge_rejects_mismatched_shapes():

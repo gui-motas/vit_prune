@@ -620,12 +620,27 @@ def configuration(record: RunRecord, policy: dict | None, region: dict, tiou: fl
                         "ficar perto e perder o que importava."),
     ]
     if masks:
+        overlap = run.get("calibration_overlap", {})
+        region_overlap = overlap.get("--region", {})
+        policy_overlap = overlap.get("legacy_original", {})
+        region_tainted = any(region_overlap.get(k) for k in ("videos", "drivers"))
+        policy_tainted = any(policy_overlap.get(k) for k in ("videos", "drivers"))
+        if region_tainted or policy_tainted:
+            subject = "A região" if region_tainted and not policy_tainted else (
+                "A política" if policy_tainted and not region_tainted else "A política e a região")
+            calibration_note = (f"{subject} tem sobreposição com vídeos ou motoristas avaliados; "
+                                "resultado exploratório.")
+        elif settings.get("allow_region_overlap"):
+            calibration_note = ("A sobreposição da região com os vídeos avaliados foi permitida; "
+                                "resultado exploratório.")
+        else:
+            calibration_note = ("A política e a região vêm de vitprune calibrate e vitprune "
+                                "region, em vídeos que não são avaliados aqui.")
         items += [
             ("Nota: máscaras", "As três variantes do ViT-Prune usam a mesma política e mantêm os "
                                "mesmos tokens por clipe; as máscaras só mudam quais tokens "
                                "ficam."),
-            ("Nota: calibração", "A política e a região vêm de vitprune calibrate e vitprune "
-                                 "region, em vídeos que não são avaliados aqui."),
+            ("Nota: calibração", calibration_note),
         ]
     else:
         masked = any(variant.endswith("_mascara") for variant in record.variants)

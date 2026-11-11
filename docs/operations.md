@@ -97,14 +97,19 @@ the reference, and each variant is compared with what the dense gave.
   without all its features is redone, its leftover rows dropped first. A folder holding
   another policy, region or setting is refused.
 - `benchmark run --policies NAME=PATH ... --fixed TOKENS ... --proportional TOKENS ...
-  --masked TOKENS ...` runs the policy study instead: the dense backbone and budgets. Each
+  --masked TOKENS ... --progressive K1 B:K2 ...` runs the policy study instead: the dense backbone and budgets. Each
   policy file, legacy or quality-aware, becomes the variant `NAME`; each fixed budget the
   variant `fixo_TOKENS`, with size-biased attention `fixo_TOKENS_pa`, and selecting only
-  inside the `--region` `fixo_TOKENS_mascara`, the one variant with a mask. `--policy`,
+  inside the `--region` `fixo_TOKENS_mascara`. `--progressive` makes the variant
+  `prog_<K1>_<K2>_..._mascara`: after the region-guided initial cut, later ToMe-style
+  merges match globally across temporal slices. `--policy`,
   optional here, adds `legacy_original`. The order the variants are timed in turns batch
   by batch. A quality-aware policy calibrated on an evaluated video or driver is refused;
   a legacy one is only reported, in `run.json`. A `--region` calibrated on them is refused
-  too whenever it chooses tokens: with `--masked`, and in the mask study.
+  too whenever it chooses tokens: with `--masked`, `--progressive`, and in the mask study.
+  `--allow-region-overlap` overrides only the region guard for exploratory runs; the
+  opt-in and overlap are recorded. `--attention {model,sdpa}` selects the backbone's own
+  attention (default) or SDPA for every variant.
 - `benchmark ama` runs the AMA temporal localizer, the pipeline's next stage, on each
   variant's features. It does not use the AMA's `eval.py`, which compares detections with
   annotations: the model runs from `ama_infer.py`, a script started in the AMA's folder
@@ -156,6 +161,7 @@ No command here recognises actions directly: `evaluate` invokes the external mod
 - `benchmark run`: under `--out`, `run.json` (inputs, checksums, settings and the clips of
   each video), `clips.jsonl` (one row per clip and variant), `features/VARIANT/` in the
   `extract` format with its manifest, and the tokens kept and frames the figures use.
+  For `prog_*`, the `tokens` column records the initial cut count, not the later counts.
   `benchmark ama` adds `ama/`: per variant `predictions.csv` (`video-id`, `t-start`,
   `t-end`, `label`, `score`, in seconds) and `ama-manifest.json`, plus `job.json` and
   `downstream.log`; `benchmark report` the workbook and `figuras/`.

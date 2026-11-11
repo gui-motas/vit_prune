@@ -1,14 +1,13 @@
 """Run the benchmark: every clip of the evaluated videos through every variant.
 
 The mask study runs the dense VideoMAE and three ViT-Prune variants under one policy. The
-policy study runs the dense VideoMAE and budgets -- policy files, fixed budgets, fixed
-budgets with size-biased attention and fixed budgets selecting inside the driver region, the
-only ones with a mask -- turning the order in which they are
-timed from batch to batch, so that none is always timed first. A quality-aware policy
-calibrated on an evaluated video or driver is refused; a legacy one is only reported.
+policy study compares policy files, fixed budgets, size-biased attention, masked fixed
+budgets and progressive region-guided cuts with later global merges. It turns the order in
+which variants are timed from batch to batch. A quality-aware policy calibrated on an
+evaluated video or driver is refused; a legacy one is only reported.
 
-The policy and the region come from the command line, calibrated on videos that are not
-evaluated here::
+The policy and region normally come from calibration videos not evaluated here; an
+explicit region-overlap override is exploratory and recorded::
 
     vitprune calibrate --videos <calibration> ... --clips-per-video 160 --out policy.json
     vitprune region --videos <calibration> --detector yolo26s.pt ... --out region.json
@@ -302,6 +301,7 @@ def write_manifests(bench: Benchmark, videos: list[Path], runners: dict) -> None
     rows = [json.loads(line) for line in bench.clips.read_text(encoding="utf-8").splitlines()]
     for name, encoder in runners.items():
         plan = encoder.plan
+        uses_region = plan.spatial_prior is not None and name != "vitprune_mascara_fixa"
         outputs = {}
         for video in videos:
             mine = sorted((r for r in rows if r["video"] == video.stem and r["variant"] == name),
@@ -320,8 +320,10 @@ def write_manifests(bench: Benchmark, videos: list[Path], runners: dict) -> None
                       "precision": bench.precision, "device": bench.device,
                       "geometry": asdict(GEOMETRY),
                       "fixed_mask": bench.fixed_mask if name == "vitprune_mascara_fixa" else None,
-                      "region": (str(bench.region) if plan.spatial_prior is not None
-                                 and name != "vitprune_mascara_fixa" else None)},
+                      "region": str(bench.region) if uses_region else None,
+                      **({"region_sha256": SourceFile.of(bench.region).sha256,
+                          "region_overlap_allowed": bench.allow_region_overlap}
+                         if uses_region else {})},
             outputs=outputs,
         ).write(bench.features / name)
 

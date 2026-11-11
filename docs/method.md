@@ -142,9 +142,8 @@ thirty blocks in order to save on ten.
 Two blocks are the default hypothesis, leaving thirty-eight blocks to save on.
 Compare cuts empirically rather than treating this as a universal optimum.
 
-A progressive schedule -- pruning a little at each block -- was considered and
-dropped. With forty blocks, the early ones are a small share of the total, so the
-advantage over a single cut is slight and the complexity is not.
+An optional progressive schedule makes later ToMe-style merges after the initial cut.
+Its quality and latency must be measured against the single-cut baseline.
 
 ## 7. Spatial priors, and when not to use them
 

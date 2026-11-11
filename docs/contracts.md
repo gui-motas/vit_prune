@@ -16,7 +16,7 @@ your own reference before measuring pruning.
 - Class tokens, relative-position schemes and model-specific forward branches are
   not automatically reproduced. A custom adapter must preserve the supported flow.
 
-`size_biased_attention=True` additionally requires VideoMAE-style `norm1`, `attn`,
+`size_biased_attention=True` and `attention="sdpa"` additionally require VideoMAE-style `norm1`, `attn`,
 `norm2`, `mlp`, and attention `num_heads`, `qkv`, `proj`; optional split q/v bias,
 layer scale and drop path follow that layout. Structural validation cannot prove
 equivalence to every external attention implementation. It remains experimental.
@@ -47,6 +47,10 @@ encoding a batch equals encoding its clips one by one, up to floating-point erro
 `encode_with_budget` also returns each clip's tokens, regime and statistics. `select`
 pads clips that keep fewer tokens with position `-1` and size zero; `kept_in(clip)`
 gives a clip's own count.
+
+Optional progressive `stages` require a `FixedBudget`; each stage follows the cut,
+keeps at least half the preceding tokens and occurs before the last block. Its next block
+must also expose `attn.qkv.weight`. `select` and `encode_levels` refuse plans with stages.
 
 ## Validation and failure modes
 

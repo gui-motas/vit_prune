@@ -119,7 +119,7 @@ def bipartite_merge(
             or not max(1, count // 2) <= keep <= count):
         raise ValueError(f"keep must be between {max(1, count // 2)} and {count}")
     if keep == count:
-        return tokens, sizes
+        return tokens, sizes.float()
 
     with torch.autocast(device_type=tokens.device.type, enabled=False):
         metric = F.normalize(metric.float(), dim=-1)
@@ -137,7 +137,7 @@ def bipartite_merge(
         sb = sb.scatter_add(1, destination, sa.gather(1, source))
         weighted = torch.cat((a.gather(1, unmerged.expand(-1, -1, dim)), b), dim=1)
         mass = torch.cat((sa.gather(1, unmerged), sb), dim=1)
-        return (weighted / mass).to(tokens.dtype), mass.to(sizes.dtype)
+        return (weighted / mass).to(tokens.dtype), mass
 
 
 @torch.no_grad()
