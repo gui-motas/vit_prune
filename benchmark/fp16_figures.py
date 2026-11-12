@@ -7,6 +7,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from arms_compare import false_positive_table  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
@@ -22,6 +23,136 @@ ARMS = [
      "Progressivo 1536→1024→768 + máscara", "#2ca02c"),
 ]
 MODES = [("a", "FP32", "latency-fp32", "o"), ("b2", "FP16+SDPA", "latency-fp16", "s")]
+
+
+def action_score(arm):
+    return arm["score"] if arm["recovered"] else (arm["best_any"] or {}).get("score", 0)
+
+
+def plot_tokens():
+    schedules = [np.full(40, 2048), np.array([2048] * 2 + [1024] * 38),
+                 np.array([2048] * 2 + [1536] * 8 + [1024] * 10 + [768] * 20)]
+    assert np.allclose([s.mean() for s in schedules], [2048, 1075.2, 1049.6])
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    edges = np.arange(0.5, 41.5)
+    for schedule, (_, _, _, label, color) in zip(schedules, ARMS, strict=True):
+        mean = f"{schedule.mean():.1f}".replace(".0", "").replace(".", ",")
+        ax.stairs(schedule, edges, color=color, linewidth=2, label=f"{label} (média {mean})")
+        if label != "Denso":
+            ax.stairs(schedule, edges, fill=True, color=color, alpha=0.15)
+    for x, label in [(2.5, "corte com score + box"), (10.5, "fusão ToMe"),
+                     (20.5, "fusão ToMe")]:
+        ax.axvline(x, color="0.45", linestyle=":", linewidth=1)
+        ax.text(x + 0.2, 200, label, rotation=90, fontsize=8, color="0.35")
+    ax.set(xlim=(0.5, 40.5), ylim=(0, 2200), xlabel="Bloco", ylabel="Tokens",
+           title="Tokens processados por bloco do VideoMAEv2-g (40 blocos)")
+    ax.legend(fontsize=8, loc="lower right")
+    ax.grid(axis="y", color="0.9")
+    fig.tight_layout()
+    fig.savefig(OUT / "tokens-por-bloco.png", dpi=150)
+    plt.close(fig)
+
+
+def plot_fidelity(videos):
+    series = [("b2", ARMS[0], "Denso FP16+SDPA"),
+              ("a", ARMS[1], "U-1024 FP32"), ("a", ARMS[2], "Progressivo FP32")]
+    distances = [[] for _ in series]
+    agreements = [[] for _ in series]
+    for video in videos:
+        data = {}
+        for run, _, _, _ in MODES:
+            for variant, _, _, _, _ in ARMS:
+                with np.load(ROOT / run / "features" / variant / f"{video}.npz") as f:
+                    data[run, variant] = (f["feats"], f["a_prob"])
+        ref, ref_prob = data["a", "denso"]
+        assert all(len(feats) == len(prob) == len(ref) for feats, prob in data.values())
+        ref = ref.astype(np.float64)
+        for i, (run, arm, _) in enumerate(series):
+            feats, prob = data[run, arm[0]]
+            feats = feats.astype(np.float64)
+            cos = np.sum(ref * feats, axis=1) / (np.linalg.norm(ref, axis=1)
+                                                  * np.linalg.norm(feats, axis=1))
+            assert np.isfinite(cos).all()
+            distances[i].extend(1 - cos)
+            agreements[i].extend(ref_prob.argmax(axis=1) == prob.argmax(axis=1))
+    assert all(len(d) == 2763 for d in distances)
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    summaries = []
+    clipped = 0
+    for (_, arm, label), values, matches in zip(series, distances, agreements, strict=True):
+        values = np.asarray(values)
+        cos = 1 - values
+        median = np.median(cos)
+        p10 = np.percentile(cos, 10)
+        agreement = np.mean(matches) * 100
+        clipped += np.count_nonzero(values < 1e-8)
+        assert np.all(values <= 1)
+        ax.hist(np.maximum(values, 1e-8), bins=np.logspace(-8, 0, 81), histtype="step",
+                color=arm[4], linewidth=1.8, label=label)
+        ax.axvline(max(1 - median, 1e-8), color=arm[4], linestyle="--", linewidth=1)
+        summaries.append(f"{label}: top-1 {agreement:.2f}% · {len(values)} clipes\n"
+                         f"mediana cos = {median:.6f}")
+        print(f"Fidelidade {label}: mediana cos={median:.9f}; P10 cos={p10:.9f}; "
+              f"top-1={agreement:.2f}%; clipes={len(values)}")
+    ax.set_xscale("log")
+    ax.set(xlim=(1e-8, 1), xlabel="1 − cosseno com o denso FP32 (escala log)",
+           ylabel="Número de clipes por intervalo",
+           title="Distância ao embedding denso FP32 por clipe (2.763 clipes): precisão × poda")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.text(0.52, 0.97, "\n".join(summaries), transform=ax.transAxes, ha="center", va="top",
+            fontsize=8, bbox=dict(facecolor="white", edgecolor="0.8", alpha=0.9))
+    if clipped:
+        fig.text(0.5, 0.01, f"{clipped} distâncias abaixo de 10⁻⁸ truncadas em 10⁻⁸.",
+                 ha="center", fontsize=8)
+    fig.tight_layout(rect=(0, 0.04 if clipped else 0, 1, 1))
+    fig.savefig(OUT / "fidelidade-fp16.png", dpi=150)
+    plt.close(fig)
+
+
+def plot_scores(actions):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5), sharex=True, sharey=True)
+    for ax, (run, title) in zip(axes, [("a", "FP32 + atenção original"),
+                                       ("b2", "FP16 + SDPA")], strict=True):
+        fixed = [a["arms"][f"{run}/{ARMS[1][0]}"] for a in actions]
+        prog = [a["arms"][f"{run}/{ARMS[2][0]}"] for a in actions]
+        x = np.array([action_score(a) for a in fixed])
+        y = np.array([action_score(a) for a in prog])
+        dense = np.array([action_score(a["arms"][f"{run}/denso"]) for a in actions])
+        recovered = np.array([u["recovered"] and p["recovered"]
+                              for u, p in zip(fixed, prog, strict=True)])
+        diff = y[recovered] - x[recovered]
+        median, greater = np.median(diff), np.count_nonzero(diff > 0)
+        print(f"Scores {title}: mediana Prog−U={median:.6f}; "
+              f"Prog>U={greater}/{len(diff)}; perdidas={len(actions) - len(diff)}")
+        ax.plot([0, 1], [0, 1], color="0.6", linewidth=0.8)
+        ax.axvline(0.30, color="0.5", linestyle="--", linewidth=0.8)
+        ax.axhline(0.30, color="0.5", linestyle="--", linewidth=0.8)
+        points = ax.scatter(x[recovered], y[recovered], c=dense[recovered], cmap="viridis",
+                            vmin=0, vmax=1, s=35, zorder=3)
+        ax.scatter(x[~recovered], y[~recovered], facecolors="none", edgecolors="red",
+                   s=55, linewidths=1.4, zorder=4, label="ação perdida")
+        for video, label, offset in [("13522_NoAudio_7", 6, (8, 30)),
+                                     ("33682_NoAudio_5", 8, (-90, 15))]:
+            indices = [i for i, action in enumerate(actions)
+                       if video in action["video-id"] and action["label"] == label]
+            assert len(indices) == 1
+            i = indices[0]
+            short_video = video.replace("_NoAudio", "")
+            ax.annotate(f"{short_video} classe {label}", (x[i], y[i]), xytext=offset,
+                        textcoords="offset points", fontsize=8,
+                        arrowprops=dict(arrowstyle="->", color="0.3"))
+        ax.text(0.03, 0.97, f"Mediana Prog − U = {median:.3f}\nProg > U em {greater}/{len(diff)}",
+                transform=ax.transAxes, va="top", fontsize=8,
+                bbox=dict(facecolor="white", edgecolor="0.8", alpha=0.9))
+        ax.text(0.31, 0.02, "corte 0,30", fontsize=8, color="0.4")
+        ax.set(xlim=(0, 1), ylim=(0, 1), title=title, xlabel="Score U-1024")
+        ax.legend(loc="lower right", fontsize=8)
+    axes[0].set_ylabel("Score Progressivo")
+    fig.suptitle("Score do AMA por ação anotada: U-1024 × Progressivo (48 ações)")
+    fig.subplots_adjust(left=0.08, right=0.87, bottom=0.12, top=0.85, wspace=0.12)
+    fig.colorbar(points, cax=fig.add_axes([0.89, 0.17, 0.018, 0.63]), label="score do denso")
+    fig.savefig(OUT / "scores-pareados.png", dpi=150)
+    plt.close(fig)
 
 
 def main():
@@ -158,6 +289,10 @@ def main():
             assert missed == len(actions) - comparison["arms"][key]["recovered"]
             assert outlined == comparison["arms"][key]["false_positives"]
             print(f"{name} | {mode} | {missed} | {outlined}")
+
+    plot_tokens()
+    plot_fidelity(videos)
+    plot_scores(actions)
 
 
 if __name__ == "__main__":

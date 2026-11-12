@@ -213,8 +213,42 @@ e nos FPs.
   - o U-1024 tem esses dois e ainda o de classe 12 (13522_7, ~450 s) e o de classe 9 (31903_7,
     ~160 s).
 
-As duas figuras são geradas por `benchmark/fp16_figures.py` a partir de `fp16-sdpa/comparacao.json`,
+As figuras desta seção (1–5) são geradas por `benchmark/fp16_figures.py` a partir de `fp16-sdpa/comparacao.json`,
 dos `latency-fp*/latency.json` e das predições do AMA.
+
+![Tokens por bloco](figuras-fp16-progressivo/tokens-por-bloco.png)
+
+*Figura 3.* Tokens processados em cada um dos 40 blocos.
+- **Custo:** a área sob a curva é proporcional ao custo das camadas lineares, que dominam o FLOP do
+  bloco.
+- **Comparação com o U-1024:** o progressivo mantém mais tokens nos blocos 3–10 e menos nos blocos
+  21–40. A média ao longo dos blocos é de 1.049,6 tokens, contra 1.075,2 do U-1024.
+
+![Fidelidade do FP16 frente à poda](figuras-fp16-progressivo/fidelidade-fp16.png)
+
+*Figura 4.* Distância (1 − cosseno) entre o embedding de cada clipe e o do denso FP32, nos 2.763 clipes,
+em escala log.
+
+| | Mediana do cosseno | Top-1 da cabeça igual ao denso FP32 |
+|---|---:|---:|
+| Denso FP16+SDPA | 0,999998 | 99,86% (4 clipes diferem) |
+| U-1024 FP32 | 0,774 | 65,7% |
+| Progressivo FP32 | 0,835 | 68,6% |
+
+- **Precisão contra poda:** o erro do FP16+SDPA fica cinco ordens de grandeza abaixo do erro da poda.
+- **Progressivo contra U-1024:** o progressivo fica mais perto do denso. O P10 do cosseno é 0,554,
+  contra 0,481 do U-1024.
+
+![Scores pareados por ação](figuras-fp16-progressivo/scores-pareados.png)
+
+*Figura 5.* Score do AMA de cada ação anotada no U-1024 (x) e no progressivo (y), com a cor dada pelo
+score do denso.
+- **Ações perdidas:** os círculos vermelhos são as 2 ações que os dois braços perdem. Elas aparecem com
+  a melhor detecção da classe certa, abaixo do corte de 0,30.
+- **Deslocamento:** não há deslocamento sistemático. A mediana de P − U é −0,001 em FP32 e 0,000 em
+  FP16. P fica acima em 20 de 46 em FP32 e em 22 de 46 em FP16.
+- **Ações destacadas:** a ação frágil 13522_7, classe 6, sobe de ~0,31 para ~0,5. A 33682_5, classe 8,
+  sobe de ~0,74 para ~0,84, perto do denso (0,84).
 
 1. **FP16 + SDPA é a melhoria dominante.**
    - **O denso** fica 5,7× mais rápido sem nenhuma mudança na tarefa: as mesmas 48 ações, os mesmos 2 FPs
