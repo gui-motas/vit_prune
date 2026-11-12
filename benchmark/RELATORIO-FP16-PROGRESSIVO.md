@@ -295,3 +295,65 @@ sem sobreposição.
 O denso FP16+SDPA continua sendo a referência de qualidade para o candidato de latência. O U-1024 fica
 como linha de base de comparação, não como candidato: com o mesmo custo, ele tem 2 FPs a mais que o
 progressivo.
+
+## 6. Fusão separada pela box (P-sep) — experimento exploratório (2026-11-12)
+
+Pré-registro: `docs/superpowers/specs/2026-11-12-region-separated-merge.md` (local, com a emenda do
+controle). Resultados: `benchmark/results/fp16-sdpa/sep/`.
+
+**Regra.** É o mesmo progressivo, mas nenhuma fusão cruza a fronteira da box:
+- **No corte do bloco 2,** um token de fora vai para o mantido mais parecido de fora, na mesma fatia, e
+  um de dentro, para o mantido mais parecido de dentro.
+- **Nas fusões ToMe,** as arestas entre dentro e fora recebem cosseno − 3.
+- **Fallback:** se não houver par do mesmo grupo, vale o mais parecido entre todos. Isso não ocorreu
+  em nenhuma etapa.
+- **Opções:** `PruningPlan.separate_region` e `--progressive-separate` (variante `prog_…_mascara_sep`).
+- **Caminho padrão:** com a opção desligada, ele é bit a bit idêntico ao código anterior (CPU,
+  `sep/check/regress.py`).
+
+**Diagnóstico** (48 clipes da C2, `sep/check/check.json`): fusões que cruzam a fronteira em cada
+etapa.
+
+| Etapa | P | P-sep |
+|---|---:|---:|
+| Corte (bloco 2) | 96,8% | 0% |
+| ToMe (bloco 10) | 4,6% | 0% |
+| ToMe (bloco 20) | 6,9% | 0% |
+
+No P, quase todo token de fundo descartado no corte vai parar dentro de um token do motorista, embora
+existam 23 mantidos de fora por fatia.
+
+**Execução** (FP16+SDPA, 3 vídeos de dev, a mesma sessão com ordem alternada; `sep/comparacao.md`):
+
+| Braço | Ações | FP | mAP | Latência p50 relativa a P (`arms_latency`) |
+|---|---:|---:|---:|---:|
+| Denso | 48/48 | 2 (classes 8 e 12) | 1,000 | 2,18× |
+| P | 46/48 | 2 (classes 8 e 10) | 0,990 | 1,000 |
+| **P-sep** | **48/48** | **4** (classes 8, 10, 12 e 1) | **0,990** | **1,008** |
+
+- **Ações:** P-sep recupera as 2 ações que todos os braços com poda perdiam: 13522_7 classe 5 (score
+  0,336) e 31903_7 classe 6 (0,326). As duas ficam acima da margem de fragilidade (±0,02 de 0,30), mas
+  perto do corte.
+- **FPs novos:** classe 12 em 13522_7 (0,31), que o denso também tem (0,33), e classe 1 em 33682_5 (0,38).
+- **Nas 46 ações em comum,** o score médio é 0,812 em P-sep, 0,798 em P e 0,844 no denso. Na diferença
+  pareada P-sep − P, a mediana é +0,002, e P-sep fica maior em 27 de 46.
+- **Latência:** P-sep custa +0,8% sobre P, dentro dos ±2% pré-registrados.
+- **Valores absolutos desta sessão:** denso 486, U-1024 231, P 223 e P-sep 225 ms por clipe. Eles ficaram
+  ~37% acima dos de 11/11, porque havia uma sessão gráfica ativa (navegador) dividindo o GPU. As razões,
+  medidas na mesma sessão, batem com as de 11/11 (denso/U 2,10; P/U 0,964). Por isso a tabela usa razões.
+- **Réplica do P:** o P desta execução repete o P da B2 em 48 de 48 status e em FP, com |Δscore| de
+  mediana 0,002 e máximo 0,042. Em FP16 o progressivo não é bit a bit reprodutível entre processos
+  (cosseno ≥ 0,99 por clipe; ver a emenda), mas é reprodutível na tarefa.
+
+**Veredito pela regra pré-registrada: piora**, porque P-sep acrescenta FP (2 → 4). A regra punia
+qualquer FP novo, mesmo com ganho de ações.
+
+**Leitura:**
+- **O que a regra não capta:** a separação troca precisão por recall. É o primeiro braço com poda que
+  reencontra as 48 ações, o mesmo recall do denso, com mAP igual ao de P e o custo de P. Os FPs a mais
+  são um que o próprio denso também comete e um novo, de classe 1.
+- **Peso da evidência:** a diferença é de 2 ações e 2 FPs, com scores perto do corte. Isso fica dentro
+  do que poucas detecções podem inverter.
+- **Para adotar P-sep como candidato** quando a prioridade for o recall, falta uma confirmação
+  pré-registrada fora deste conjunto, com uma regra que pondere ações e FPs explicitamente.
+- **Até lá,** os candidatos da §5 continuam os mesmos.
