@@ -342,8 +342,13 @@ existam 23 mantidos de fora por fatia.
   ~37% acima dos de 11/11, porque havia uma sessão gráfica ativa (navegador) dividindo o GPU. As razões,
   medidas na mesma sessão, batem com as de 11/11 (denso/U 2,10; P/U 0,964). Por isso a tabela usa razões.
 - **Réplica do P:** o P desta execução repete o P da B2 em 48 de 48 status e em FP, com |Δscore| de
-  mediana 0,002 e máximo 0,042. Em FP16 o progressivo não é bit a bit reprodutível entre processos
-  (cosseno ≥ 0,99 por clipe; ver a emenda), mas é reprodutível na tarefa.
+  mediana 0,002 e máximo 0,042.
+- **Reprodutibilidade, corrigida em 12/11:**
+  - Com o código da B2 (`f4c7578`, `size` em FP16), o P não era bit a bit reprodutível entre processos.
+  - Com o código atual (`size` em float32, desde `24c844f`), duas execuções independentes (`sep` e
+    `drop`, §7) deram o P, o P-sep e o denso bit a bit idênticos.
+  - A diferença contra a B2 vem, portanto, da mudança de código, e não de uma instabilidade do
+    progressivo.
 
 **Veredito pela regra pré-registrada: piora**, porque P-sep acrescenta FP (2 → 4). A regra punia
 qualquer FP novo, mesmo com ganho de ações.
@@ -357,3 +362,69 @@ qualquer FP novo, mesmo com ganho de ações.
 - **Para adotar P-sep como candidato** quando a prioridade for o recall, falta uma confirmação
   pré-registrada fora deste conjunto, com uma regra que pondere ações e FPs explicitamente.
 - **Até lá,** os candidatos da §5 continuam os mesmos.
+
+## 7. Descartar o fundo no corte (P-drop) — hipótese 2 (2026-11-12)
+
+Branch `exp/discard-background`. Pré-registro: `docs/superpowers/specs/2026-11-12-discard-background.md`
+(local). Resultados: `benchmark/results/fp16-sdpa/drop/`.
+
+**Hipótese.** O AMA foi treinado com embeddings de vídeos **recortados no motorista**. Descartar os
+tokens de fora da box, em vez de fundi-los, aproximaria o embedding do que o AMA viu no treino.
+
+**Regra.**
+- **No corte do bloco 2,** os 87 tokens de fora da box de cada fatia são descartados: não ficam e não
+  se fundem.
+- **Os 169 tokens de dentro ficam todos** (1.352 por clipe), sem fusão no corte.
+- **Depois,** as fusões ToMe do progressivo continuam (bloco 10 → 1024, bloco 20 → 768), e o pooling
+  ponderado é feito sobre o que restou. O embedding vira a média da região do motorista.
+- **Opções:** `PruningPlan.discard_outside` e `--progressive-discard 1352 10:1024 20:768` (variante
+  `prog_1352_1024_768_mascara_drop`).
+- **Caminho padrão:** com a opção desligada, ele é bit a bit idêntico ao código anterior (CPU,
+  `drop/check/regress2.py`).
+- **Checagem na GPU:** o bloco 3 recebe `[8, 1352, 1408]`, e a saída é finita.
+
+**Execução** (FP16+SDPA, 3 vídeos de dev, a mesma sessão com ordem alternada; latência de
+`arms_latency`, 48 clipes):
+
+| Braço | Ações | FP | mAP | Score médio (46 em comum) | ms/clipe | vs P |
+|---|---:|---:|---:|---:|---:|---:|
+| Denso | 48/48 | 2 (classes 8 e 12) | 1,000 | 0,844 | 345,9 | 2,19× |
+| U-1024 | — | — | — | — | 160,9 | 1,02× |
+| P | 46/48 | 2 (classes 8 e 10) | 0,990 | 0,798 | 158,1 | 1,00× |
+| P-sep | 48/48 | 4 (classes 8, 10, 12 e 1) | 0,990 | 0,812 | 158,5 | 1,00× |
+| **P-drop** | **48/48** | **2 (classes 8 e 12)** | **1,000** | **0,847** | **151,6** | **0,96×** |
+
+O U-1024 não entrou nesta execução. A linha dele só traz a latência, medida na mesma sessão.
+
+**P-drop contra P:**
+- **Ações:** recupera as 2 ações que P perde.
+  - 31903_7 classe 6 sai com score 0,753, como no denso (0,748).
+  - 13522_7 classe 5 sai com 0,31, perto do corte. O denso dá 0,40.
+- **FPs:** os mesmos 2 FPs do denso, de classe 8 e de classe 12, este último com 0,31 (o denso dá 0,33).
+  Some o FP de classe 10 do P.
+- **Score pareado nas 46 ações em comum:** P-drop − P tem mediana +0,027, e P-drop fica maior em 33 de
+  46.
+- **Latência:** é 4% mais rápido que P, 5,8% mais rápido que o U-1024 e 2,28× mais rápido que o denso
+  FP16+SDPA. Contra o denso FP32, isso dá ≈13,4×.
+
+**Veredito pela regra pré-registrada: melhora.**
+- **Cálculo completo:** N = Δações − ΔFP = +2 − 0 = **+2**, com mAP 1,000 contra 0,990.
+- **Sem os itens frágeis** (a ação 13522_7 classe 5 e o FP de classe 12, os dois com score 0,31): N =
+  +1 − (−1) = **+2**.
+- Os dois cálculos concordam, então o resultado não é "inconclusivo".
+
+**Réplicas e reprodutibilidade.** O P e o P-sep desta execução são bit a bit idênticos aos da execução
+`sep`, nas features e nos scores, em processos independentes.
+
+**Leitura:**
+- **O P-drop iguala o denso na tarefa nos 3 vídeos de dev:** as mesmas 48 ações, os mesmos FPs, mAP 1,000
+  e score médio equivalente (0,847 contra 0,844). Ele é mais rápido que todas as variantes anteriores.
+- **Interpretação:** o resultado é coerente com a hipótese. Fundir o fundo nos tokens do motorista
+  atrapalhava, e separar (P-sep) já recuperava as ações. Descartar o fundo tira a contaminação e ainda
+  aproxima o embedding do recorte com que o AMA foi treinado.
+- **Ressalva mais forte que nos outros braços:** o P-drop depende inteiramente da box, e esta box foi
+  calibrada nos mesmos motoristas avaliados. Num motorista novo, uma box mal posicionada cortaria
+  partes do próprio motorista, e o P-drop não tem como recuperá-las. A confirmação no holdout
+  (35418, 36305), com uma box sem sobreposição, é condição para adotá-lo.
+- **Candidatos:** o P-drop é o candidato natural para a prioridade de latência, no lugar do P. A troca
+  na §5 fica para a decisão do responsável e para a confirmação fora do conjunto de dev.
