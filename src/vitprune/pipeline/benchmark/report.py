@@ -74,11 +74,12 @@ def _fixed(variant: str) -> tuple[int, str] | None:
 
 def variant_name(variant: str) -> str:
     """A variant's name in the tables."""
-    progressive = re.fullmatch(r"prog_(\d+(?:_\d+)+)_mascara(_sep)?", variant)
+    progressive = re.fullmatch(r"prog_(\d+(?:_\d+)+)_mascara(_sep|_drop)?", variant)
     if progressive:
         tokens = progressive.group(1).replace("_", "→")
         return (f"ViT-Prune progressivo {tokens} + máscara do motorista"
-                + (" + fusão separada pela box" if progressive.group(2) else ""))
+                + {"_sep": " + fusão separada pela box", "_drop": " + fundo descartado"}.get(
+                    progressive.group(2), ""))
     fixed = _fixed(variant)
     if fixed:
         extra = {"pa": " + atenção proporcional", "mascara": " + máscara do motorista"}
@@ -90,10 +91,10 @@ def short_label(variant: str) -> str:
     """A variant's name for a chart axis; the dense one says it is the reference."""
     if variant == "denso":
         return "Denso (referência)"
-    progressive = re.fullmatch(r"prog_(\d+(?:_\d+)+)_mascara(_sep)?", variant)
+    progressive = re.fullmatch(r"prog_(\d+(?:_\d+)+)_mascara(_sep|_drop)?", variant)
     if progressive:
         return (f"Prog {progressive.group(1).replace('_', '→')} + máscara"
-                + (" + sep" if progressive.group(2) else ""))
+                + {"_sep": " + sep", "_drop": " + drop"}.get(progressive.group(2), ""))
     fixed = _fixed(variant)
     if fixed:
         return f"Fixo {fixed[0]}" + {"pa": " + AP", "mascara": " + máscara"}.get(fixed[1], "")
@@ -645,7 +646,8 @@ def configuration(record: RunRecord, policy: dict | None, region: dict, tiou: fl
             ("Nota: calibração", calibration_note),
         ]
     else:
-        masked = any(variant.endswith(("_mascara", "_mascara_sep")) for variant in record.variants)
+        masked = any(variant.endswith(("_mascara", "_mascara_sep", "_mascara_drop"))
+                     for variant in record.variants)
         items += [
             ("Nota: variantes", ("'+ máscara do motorista' só mantém tokens dentro da região do "
                                  "motorista da rodada; as demais variantes não usam máscara. "

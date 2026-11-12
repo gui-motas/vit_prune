@@ -69,6 +69,7 @@ class Benchmark:
         attention: backbone attention implementation, ``model`` or ``sdpa``.
         progressive: cut and later merges as ``(block, tokens)`` pairs.
         progressive_separate: also compare region-separated progressive merging.
+        progressive_discard: an independent progressive schedule discarding background.
         allow_region_overlap: allow and record a region calibrated on evaluated footage.
     """
 
@@ -97,6 +98,7 @@ class Benchmark:
     progressive: tuple[tuple[int, int], ...] = ()
     allow_region_overlap: bool = False
     progressive_separate: bool = False
+    progressive_discard: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("videos", "out", "region", "weights", "model_source"):
@@ -112,16 +114,20 @@ class Benchmark:
             raise ValueError("progressive_separate must be a bool")
         if self.progressive_separate and not self.progressive:
             raise ValueError("--progressive-separate requires --progressive")
-        if self.progressive:
-            if (not isinstance(self.progressive, (tuple, list))
+        for name in ("progressive", "progressive_discard"):
+            schedule = getattr(self, name)
+            if not schedule:
+                continue
+            if (not isinstance(schedule, (tuple, list))
                     or any(not isinstance(stage, (tuple, list)) or len(stage) != 2
-                           for stage in self.progressive)):
-                raise ValueError("progressive must be (block, tokens) pairs")
-            self.progressive = tuple(tuple(stage) for stage in self.progressive)
-            if len(self.progressive) < 2 or self.progressive[0][0] != self.prune_layer:
-                raise ValueError("progressive needs the cut and at least one later stage")
-            PruningPlan(prune_layer=self.prune_layer, budget=FixedBudget(self.progressive[0][1]),
-                        stages=self.progressive[1:]).validate_for(GEOMETRY)
+                           for stage in schedule)):
+                raise ValueError(f"{name} must be (block, tokens) pairs")
+            schedule = tuple(tuple(stage) for stage in schedule)
+            setattr(self, name, schedule)
+            if len(schedule) < 2 or schedule[0][0] != self.prune_layer:
+                raise ValueError(f"{name} needs the cut and at least one later stage")
+            PruningPlan(prune_layer=self.prune_layer, budget=FixedBudget(schedule[0][1]),
+                        stages=schedule[1:]).validate_for(GEOMETRY)
         names = [name for name, _ in self.policies]
         for name in names:
             generated = name.startswith(("fixo_", "prog_"))
@@ -148,11 +154,16 @@ class Benchmark:
     def policy_study(self) -> bool:
         """Budgets compared with one another, rather than masks under one policy."""
         return bool(self.policies or self.fixed or self.proportional or self.masked
-                    or self.progressive)
+                    or self.progressive or self.progressive_discard)
 
     @property
     def progressive_name(self) -> str:
         return "prog_" + "_".join(str(tokens) for _, tokens in self.progressive) + "_mascara"
+
+    @property
+    def progressive_discard_name(self) -> str:
+        return ("prog_" + "_".join(str(tokens) for _, tokens in self.progressive_discard)
+                + "_mascara_drop")
 
     @property
     def variants(self) -> tuple[str, ...]:
@@ -163,7 +174,8 @@ class Benchmark:
                 *(f"fixo_{k}_pa" for k in self.proportional),
                 *(f"fixo_{k}_mascara" for k in self.masked),
                 *((self.progressive_name,) if self.progressive else ()),
-                *((self.progressive_name + "_sep",) if self.progressive_separate else ()))
+                *((self.progressive_name + "_sep",) if self.progressive_separate else ()),
+                *((self.progressive_discard_name,) if self.progressive_discard else ()))
 
     @property
     def span(self) -> int:

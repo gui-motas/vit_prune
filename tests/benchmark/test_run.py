@@ -93,6 +93,31 @@ def test_separated_progressive_run_records_its_plan(bench, model):
         assert json.loads(path.read_text("utf-8"))["settings"]["separate_region"] is expected
 
 
+def test_discard_run_records_its_schedule_and_manifest(bench, model):
+    bench.policy = None
+    bench.progressive_discard = ((2, 32), (3, 24))
+    inference.run_benchmark(bench)
+    record = json.loads(bench.record.read_text("utf-8"))
+    assert record["settings"]["progressive_discard"] == [[2, 32], [3, 24]]
+    assert "progressive" not in record["settings"]
+    for variant, expected in (("denso", False), ("prog_32_24_mascara_drop", True)):
+        path = bench.features / variant / MANIFEST_NAME
+        assert json.loads(path.read_text("utf-8"))["settings"]["discard_outside"] is expected
+    assert {row["variant"] for row in _rows(bench)} == {"denso", "prog_32_24_mascara_drop"}
+
+
+def test_discard_region_overlap_requires_opt_in(bench, model, tmp_path):
+    bench.region = _region_from(bench, tmp_path / "leaky.json", {"v": [0.1, 0.2, 0.9, 1.0]})
+    bench.policy = None
+    bench.progressive_discard = ((2, 32), (3, 24))
+    with pytest.raises(ValueError, match="region"):
+        inference.run_benchmark(bench)
+    bench.allow_region_overlap = True
+    inference.run_benchmark(bench)
+    record = json.loads(bench.record.read_text("utf-8"))
+    assert record["calibration_overlap"]["--region"]["videos"] == ["v"]
+
+
 def test_the_run_writes_what_the_next_steps_read(bench, model, geometry):
     inference.run_benchmark(bench)
 
@@ -488,4 +513,5 @@ def test_allowing_region_overlap_still_refuses_a_tainted_quality_policy(bench, t
 def test_default_record_settings_remain_compatible(bench, model):
     inference.run_benchmark(bench)
     settings = json.loads(bench.record.read_text("utf-8"))["settings"]
-    assert not {"attention", "progressive", "allow_region_overlap"} & settings.keys()
+    assert not {"attention", "progressive", "progressive_discard",
+                "allow_region_overlap"} & settings.keys()

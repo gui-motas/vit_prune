@@ -513,15 +513,16 @@ def _run_benchmark_run(args) -> int:
         if not name or not path:
             raise ValueError(f"--policies takes NAME=PATH, got {item!r}")
         policies.append((name, path))
-    progressive = ()
-    if args.progressive:
-        if len(args.progressive) < 2:
-            raise ValueError("--progressive needs TOKENS and at least one BLOCK:TOKENS")
+    def schedule(items, option):
+        if not items:
+            return ()
+        if len(items) < 2:
+            raise ValueError(f"{option} needs TOKENS and at least one BLOCK:TOKENS")
         try:
-            progressive = ((args.prune_layer, int(args.progressive[0])), *(
-                tuple(int(value) for value in item.split(":")) for item in args.progressive[1:]))
+            return ((args.prune_layer, int(items[0])), *(
+                tuple(int(value) for value in item.split(":")) for item in items[1:]))
         except ValueError as error:
-            raise ValueError("--progressive takes TOKENS followed by BLOCK:TOKENS") from error
+            raise ValueError(f"{option} takes TOKENS followed by BLOCK:TOKENS") from error
     bench = Benchmark(
         videos=args.videos,
         out=args.out,
@@ -545,15 +546,16 @@ def _run_benchmark_run(args) -> int:
         proportional=tuple(args.proportional or ()),
         masked=tuple(args.masked or ()),
         attention=args.attention,
-        progressive=progressive,
+        progressive=schedule(args.progressive, "--progressive"),
+        progressive_discard=schedule(args.progressive_discard, "--progressive-discard"),
         progressive_separate=args.progressive_separate,
         allow_region_overlap=args.allow_region_overlap,
     )
 
     print(RULE)
     if bench.policy_study:
-        masked = (", the _mascara ones inside the driver region"
-                  if bench.masked or bench.progressive else ", no mask")
+        masked = (", the _mascara ones inside the driver region" if
+                  bench.masked or bench.progressive or bench.progressive_discard else ", no mask")
         print(f"the dense backbone and {len(bench.variants) - 1} budgets{masked}, on every clip")
     else:
         print("the dense backbone and three ViT-Prune variants, on every clip")
@@ -958,6 +960,10 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_run.add_argument(
         "--progressive-separate", action="store_true",
         help="add a progressive variant that separates merges by the driver region",
+    )
+    bench_run.add_argument(
+        "--progressive-discard", nargs="+", metavar="TOKENS|BLOCK:TOKENS",
+        help="progressive schedule discarding tokens outside the driver region at the cut",
     )
     bench_run.add_argument(
         "--allow-region-overlap", action="store_true",

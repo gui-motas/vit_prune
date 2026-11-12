@@ -375,6 +375,13 @@ def test_separated_progressive_names():
     assert report.short_label(name) == "Prog 1536→1024→768 + máscara + sep"
 
 
+def test_discard_progressive_names():
+    name = "prog_1352_1024_768_mascara_drop"
+    assert report.variant_name(name) == ("ViT-Prune progressivo 1352→1024→768"
+                                         " + máscara do motorista + fundo descartado")
+    assert report.short_label(name) == "Prog 1352→1024→768 + máscara + drop"
+
+
 def test_a_progressive_budget_is_named_for_its_stages():
     variant = "prog_1536_1024_768_mascara"
     assert report.variant_name(variant) == (
@@ -382,7 +389,7 @@ def test_a_progressive_budget_is_named_for_its_stages():
     assert report.short_label(variant) == "Prog 1536→1024→768 + máscara"
 
 
-@pytest.mark.parametrize("suffix", ["", "_sep"])
+@pytest.mark.parametrize("suffix", ["", "_sep", "_drop"])
 def test_a_progressive_variant_can_be_reported(tmp_path, suffix):
     pytest.importorskip("openpyxl")
     out = _policy_run(tmp_path)
@@ -395,7 +402,8 @@ def test_a_progressive_variant_can_be_reported(tmp_path, suffix):
     book = pd.ExcelFile(report.make_report(out))
     summary = book.parse("Resumo").set_index("Variante")
     label = "ViT-Prune progressivo 32→24 + máscara do motorista"
-    progressive = summary.loc[label + (" + fusão separada pela box" if suffix else "")]
+    extra = {"": "", "_sep": " + fusão separada pela box", "_drop": " + fundo descartado"}
+    progressive = summary.loc[label + extra[suffix]]
     assert pd.isna(progressive["Speedup previsto"])
     assert progressive["Speedup medido"] == pytest.approx(2.0)
     assert summary.loc["ViT-Prune fixo 32 tokens", "Speedup previsto"] > 1

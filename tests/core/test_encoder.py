@@ -289,6 +289,90 @@ def test_stage_uses_next_block_for_keys(monkeypatch):
     assert len(seen) == 1 and seen[0] is backbone.blocks[3]
 
 
+@pytest.mark.parametrize("keep", [8, 4])
+def test_discard_cut_keeps_only_inside_mass_and_merges_only_inside(keep, monkeypatch):
+    import vitprune.core.encoder as module
+
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    prior = torch.tensor([0.] * 8 + [1.] * 8)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        spatial_prior=prior, budget=FixedBudget(keep * 4), discard_outside=True,
+        stages=((3, keep * 2),)))
+    cut, merged, masses, cut_sizes = [], [], [], []
+    backbone.blocks[1].register_forward_hook(lambda m, a, output: cut.append(output.clone()))
+    original_merge, original_pool, original_run = module.merge_tokens, encoder._pool, encoder._run
+
+    def observe_merge(tokens, sizes, scores, count, groups):
+        merged.append(tokens.clone())
+        return original_merge(tokens, sizes, scores, count, groups)
+
+    def observe_pool(tokens, sizes):
+        masses.append(sizes.clone())
+        return original_pool(tokens, sizes)
+
+    def observe_run(block, tokens, sizes):
+        if block is backbone.blocks[2]:
+            cut_sizes.append(sizes.clone())
+        return original_run(block, tokens, sizes)
+
+    monkeypatch.setattr(module, "merge_tokens", observe_merge)
+    monkeypatch.setattr(encoder, "_pool", observe_pool)
+    monkeypatch.setattr(encoder, "_run", observe_run)
+    result = encoder.encode(torch.randn(*geometry.input_shape(batch=2)))
+    assert torch.isfinite(result).all()
+    assert len(merged) == (0 if keep == 8 else 1)
+    if merged:
+        expected = cut[0].reshape(2, 4, 16, geometry.embed_dim)[:, :, 8:]
+        torch.testing.assert_close(merged[0], expected)
+    else:
+        assert torch.equal(cut_sizes[0], torch.ones_like(cut_sizes[0]))
+    assert tuple(cut_sizes[0].shape) == (2, 4, keep, 1)
+    torch.testing.assert_close(cut_sizes[0].reshape(2, -1).sum(dim=1), torch.tensor([32., 32.]))
+    torch.testing.assert_close(masses[0].reshape(2, -1).sum(dim=1), torch.tensor([32., 32.]))
+    assert "outside region discarded" in encoder.plan.describe()
+
+
+def test_discarded_tokens_at_cut_do_not_change_embedding(backbone, geometry, clips):
+    prior = torch.tensor([0.] * 8 + [1.] * 8)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        spatial_prior=prior, budget=FixedBudget(32), discard_outside=True))
+    expected = encoder.encode(clips)
+
+    def perturb(module, args, output):
+        grid = output.clone().reshape(2, 4, 16, geometry.embed_dim)
+        grid[:, :, :8] += 1000
+        return grid.reshape_as(output)
+
+    hook = backbone.blocks[1].register_forward_hook(perturb)
+    try:
+        actual = encoder.encode(clips)
+    finally:
+        hook.remove()
+    assert torch.equal(actual, expected)
+
+
+def test_discard_validation_and_inspection_refusals(backbone, geometry, clips):
+    prior = torch.tensor([0.] * 8 + [1.] * 8)
+    for options in (
+        {"discard_outside": 1, "spatial_prior": prior, "budget": FixedBudget(32)},
+        {"discard_outside": True, "budget": FixedBudget(32)},
+        {"discard_outside": True, "spatial_prior": prior},
+        {"discard_outside": True, "spatial_prior": prior, "budget": FixedBudget(32),
+         "separate_region": True},
+        {"discard_outside": True, "spatial_prior": prior, "budget": FixedBudget(36)},
+        {"discard_outside": True, "spatial_prior": torch.zeros(16), "budget": FixedBudget(4)},
+    ):
+        with pytest.raises(ValueError, match="discard_outside"):
+            PrunedEncoder(backbone, geometry, PruningPlan(**options))
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        spatial_prior=prior, budget=FixedBudget(32), discard_outside=True))
+    with pytest.raises(ValueError, match="discard"):
+        encoder.select(clips)
+    with pytest.raises(ValueError, match="discard"):
+        encoder.encode_levels(clips, [32])
+
+
 @pytest.mark.parametrize("split_bias", [True, False])
 def test_stages_allow_qkv_without_a_bias_attribute(split_bias):
     from vitprune.core.testing import ReferenceAttention

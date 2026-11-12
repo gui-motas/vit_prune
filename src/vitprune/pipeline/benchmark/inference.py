@@ -127,6 +127,11 @@ def encoders(bench: Benchmark, model, policies: dict, region) -> dict[str, Prune
             if bench.progressive_separate:
                 plans[bench.progressive_name + "_sep"] = replace(
                     plans[bench.progressive_name], separate_region=True)
+        if bench.progressive_discard:
+            schedule = bench.progressive_discard
+            plans[bench.progressive_discard_name] = PruningPlan(
+                prune_layer=layer, budget=FixedBudget(schedule[0][1]), spatial_prior=region,
+                stages=schedule[1:], attention=bench.attention, discard_outside=True)
     else:
         fixed = top_rows_prior(GEOMETRY.grid_size, bench.fixed_rows, bench.fixed_weight)
         priors = {"vitprune": None, "vitprune_mascara_fixa": fixed,
@@ -321,6 +326,7 @@ def write_manifests(bench: Benchmark, videos: list[Path], runners: dict) -> None
                       "size_biased_attention": plan.size_biased_attention,
                       "attention": plan.attention, "stages": [list(stage) for stage in plan.stages],
                       "separate_region": plan.separate_region,
+                      "discard_outside": plan.discard_outside,
                       "precision": bench.precision, "device": bench.device,
                       "geometry": asdict(GEOMETRY),
                       "fixed_mask": bench.fixed_mask if name == "vitprune_mascara_fixa" else None,
@@ -376,7 +382,7 @@ def run_benchmark(bench: Benchmark) -> None:
     videos = bench.evaluated()
     evaluated = {video.stem: SourceFile.of(video).sha256 for video in videos}
     overlap = {name: calibration_overlap(path, evaluated) for name, path in files.items()}
-    if not bench.policy_study or bench.masked or bench.progressive:
+    if not bench.policy_study or bench.masked or bench.progressive or bench.progressive_discard:
         overlap["--region"] = calibration_overlap(bench.region, evaluated)
     tainted = {name: found for name, found in overlap.items()
                if (name == "--region" or isinstance(policies[name], QualityAwareBudgetPolicy))
@@ -409,6 +415,8 @@ def run_benchmark(bench: Benchmark) -> None:
             settings["progressive"] = [list(stage) for stage in bench.progressive]
         if bench.progressive_separate:
             settings["progressive_separate"] = True
+        if bench.progressive_discard:
+            settings["progressive_discard"] = [list(stage) for stage in bench.progressive_discard]
     if bench.attention != "model":
         settings["attention"] = bench.attention
     if bench.allow_region_overlap:

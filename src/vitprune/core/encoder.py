@@ -74,6 +74,9 @@ class PruningPlan:
         attention: use the backbone's own attention or the explicit SDPA path.
         stages: further (block, tokens per clip) merges after the initial cut.
         separate_region: penalize merging across ``spatial_prior > 0``; requires a prior.
+        discard_outside: discard positions outside the prior at the cut; requires a budget
+            and prior, and cannot be combined with redundant ``separate_region``. Scores and
+            adaptive budget decisions still see the full grid before positions are discarded.
         budget: what decides how many tokens each clip keeps: an adaptive policy, a
             quality-aware one, or a fixed budget. Without one, nothing is pruned; the cut
             still marks where clip statistics are measured, which is what calibration
@@ -89,6 +92,7 @@ class PruningPlan:
     attention: str = "model"
     stages: tuple[tuple[int, int], ...] = ()
     separate_region: bool = False
+    discard_outside: bool = False
 
     def __post_init__(self) -> None:
         validate_prune_layer(self.prune_layer)
@@ -106,6 +110,12 @@ class PruningPlan:
             raise ValueError("separate_region must be a bool")
         if self.separate_region and self.spatial_prior is None:
             raise ValueError("separate_region requires spatial_prior")
+        if not isinstance(self.discard_outside, bool):
+            raise ValueError("discard_outside must be a bool")
+        if self.discard_outside and (self.spatial_prior is None or self.budget is None):
+            raise ValueError("discard_outside requires spatial_prior and a budget")
+        if self.discard_outside and self.separate_region:
+            raise ValueError("discard_outside cannot be combined with separate_region")
         if self.attention not in ("model", "sdpa"):
             raise ValueError("attention must be 'model' or 'sdpa'")
         if self.spatial_prior is not None:
@@ -159,6 +169,10 @@ class PruningPlan:
                 raise ValueError("spatial_prior positions must match geometry.tokens_per_slice")
         if self.budget is not None:
             self.budget.validate_for(geometry)
+        if self.discard_outside and max(self.budget.levels) > (
+            int((self.spatial_prior > 0).sum()) * geometry.temporal_slices
+        ):
+            raise ValueError("discard_outside budget exceeds positions inside spatial_prior")
         if self.stages and self.stages[-1][0] >= geometry.depth:
             raise ValueError("stage blocks must precede the last block")
 
@@ -184,6 +198,8 @@ class PruningPlan:
             extra += ", spatial prior"
         if self.separate_region:
             extra += ", separate region merging"
+        if self.discard_outside:
+            extra += ", outside region discarded"
         if self.stages:
             extra += ", stages " + " ".join(f"{block}:{tokens}" for block, tokens in self.stages)
         levels = "/".join(str(level) for level in self.budget.levels)
@@ -297,6 +313,8 @@ class PrunedEncoder(nn.Module):
         keeping fewer tokens than the widest one are padded with position ``-1`` and
         size zero.
         """
+        if self.plan.discard_outside:
+            raise ValueError("select does not support discard_outside")
         if self.plan.stages:
             raise ValueError("select does not support progressive stages")
         grid = self._grid_at_cut(clips, needs_budget=True)
@@ -366,6 +384,8 @@ class PrunedEncoder(nn.Module):
             cells, top: the probe's anchors, as in
                 :func:`vitprune.core.compressibility.probe_errors`.
         """
+        if self.plan.discard_outside:
+            raise ValueError("encode_levels does not support discard_outside")
         if self.plan.stages:
             raise ValueError("encode_levels does not support progressive stages")
         levels = sorted({*levels, self.geometry.num_tokens})
@@ -427,6 +447,9 @@ class PrunedEncoder(nn.Module):
         base = score_tokens(grid, self.plan.motion_weight)
         keeps, budget = self._keeps(grid, base)
         scores = self._with_prior(base)
+        if self.plan.discard_outside:
+            inside = self.plan.spatial_prior.to(grid.device) > 0
+            grid, scores = grid[:, :, inside], scores[:, :, inside]
 
         embeddings = None
         for keep, members in self._groups(keeps):
@@ -437,8 +460,11 @@ class PrunedEncoder(nn.Module):
             if region is not None:
                 kept_at = scores[members].argsort(dim=-1, descending=True)[..., :keep]
                 groups = region[kept_at.sort(dim=-1).values].reshape(count, slices * keep)
-            if keep == self.geometry.tokens_per_slice:
-                group, sizes = part.reshape(count, slices * keep, dim), None
+            if keep == part.shape[2]:
+                group = part.reshape(count, slices * keep, dim)
+                sizes = initial_sizes(part) if self.plan.discard_outside else None
+                if sizes is not None and self.plan.stages:
+                    sizes = sizes.float()
             else:
                 sizes = initial_sizes(part)
                 if self.plan.stages:

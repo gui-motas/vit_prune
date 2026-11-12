@@ -288,6 +288,27 @@ def test_separated_progressive_flag_adds_an_arm_and_requires_progressive(tmp_pat
                                 "prog_1536_1024_768_mascara_sep")
 
 
+def test_discard_progressive_has_an_independent_schedule(tmp_path, monkeypatch):
+    from vitprune.pipeline.benchmark import inference
+
+    seen = []
+    monkeypatch.setattr(inference, "run_benchmark", seen.append)
+    command = ["benchmark", "run", "--videos", str(tmp_path), "--region", "r.json",
+               "--weights", "w", "--model-source", "src", "--progressive-discard",
+               "1352", "10:1024", "20:768"]
+    assert main(command) == 0
+    assert seen[0].progressive_discard == ((2, 1352), (10, 1024), (20, 768))
+    assert seen[0].variants == ("denso", "prog_1352_1024_768_mascara_drop")
+    assert main(command + ["--progressive", "1536", "10:1024", "20:768"]) == 0
+    assert seen[1].variants == ("denso", "prog_1536_1024_768_mascara",
+                                "prog_1352_1024_768_mascara_drop")
+
+
+@pytest.mark.parametrize("schedule", [("1352",), ("1352", "bad"), ("1352", "2:1024")])
+def test_invalid_discard_schedule_is_refused(tmp_path, schedule):
+    assert main(_run_command(tmp_path, "--progressive-discard", *schedule)) == 2
+
+
 @pytest.mark.parametrize("progressive", [
     ("1001", "10:768"), ("1536",), ("1536", "bad"), ("1536", "10:xx"),
     ("1536", "2:1024"), ("1536", "40:1024"), ("1536", "10:512"),

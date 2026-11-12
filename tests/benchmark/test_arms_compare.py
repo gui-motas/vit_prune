@@ -217,6 +217,85 @@ def test_progressive_plan_and_mean_tokens():
         latency.make_plans(["prog:1536,10:768,9:512"], None, "model")
 
 
+def test_discard_progressive_latency_arm():
+    import torch
+
+    from vitprune.pipeline.benchmark.settings import GEOMETRY
+
+    latency = load("arms_latency")
+    arm = "prog-drop:1352,10:1024,20:768"
+    plan = latency.make_plans([arm], torch.tensor([1.] * 169 + [0.] * 87), "sdpa")[arm]
+    assert plan.discard_outside and not plan.separate_region
+    assert latency.mean_tokens(plan, GEOMETRY) == 1012.8
+
+
+def test_drop_smoke_observes_sdpa_block_and_preserves_output():
+    import torch
+
+    from vitprune.core import FixedBudget, PrunedEncoder, PruningPlan
+    from vitprune.core.testing import reference_backbone, reference_geometry
+
+    check = load("drop_check")
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        spatial_prior=torch.tensor([0.] * 8 + [1.] * 8), budget=FixedBudget(32),
+        stages=((3, 24),), attention="sdpa", discard_outside=True))
+    batch = torch.randn(*geometry.input_shape(batch=8))
+    expected = encoder.encode(batch)
+    embedding, shapes = check.observe(encoder, batch, "cpu")
+    assert shapes == [[8, 32, geometry.embed_dim]]
+    torch.testing.assert_close(embedding, expected)
+    assert not backbone.blocks[2]._forward_pre_hooks
+
+
+def test_drop_smoke_batch_refuses_incomplete_decode(tmp_path, monkeypatch):
+    import torch
+
+    from vitprune.pipeline import video
+    from vitprune.pipeline.benchmark import inference
+    from vitprune.pipeline.benchmark.settings import Benchmark
+
+    check = load("drop_check")
+    stem = "Dashboard_user_id_13522_NoAudio_7"
+    (tmp_path / f"{stem}.mp4").touch()
+    bench = Benchmark(videos=tmp_path, out=tmp_path, policy=None, region=tmp_path / "r",
+                      weights=tmp_path / "w", model_source=tmp_path, masked=(1024,))
+    monkeypatch.setattr(inference, "video_info", lambda path: {"frames": 200})
+    monkeypatch.setattr(video, "iter_clips", lambda *a: iter((i * 16, torch.tensor(i))
+                                                             for i in range(7)))
+    with pytest.raises(ValueError, match="incomplete"):
+        check.first_batch(bench)
+
+
+@pytest.mark.parametrize("shapes,finite,expected", [
+    ([[8, 1352, 1408]], True, 0), ([[8, 1351, 1408]], True, 2),
+    ([[8, 1352, 1408]], False, 2), ([], True, 2),
+])
+def test_drop_smoke_writes_gate_and_exit_status(tmp_path, monkeypatch, capsys,
+                                                shapes, finite, expected):
+    import torch
+
+    import vitprune.core as core
+
+    check = load("drop_check")
+    monkeypatch.setattr(check, "setup", lambda args: (
+        SimpleNamespace(device="cpu"), object(), torch.tensor([1.] * 169 + [0.] * 87)))
+    monkeypatch.setattr(check, "first_batch", lambda bench: (torch.zeros(8), list(range(8))))
+    monkeypatch.setattr(core, "PrunedEncoder", lambda *args: object())
+    monkeypatch.setattr(check, "observe", lambda *args: (
+        torch.tensor([2.] if finite else [float("nan")]), shapes))
+    monkeypatch.setattr(sys, "argv", ["drop_check.py", "--videos", "v", "--region", "r",
+                                     "--weights", "w", "--model-source", "s", "--out",
+                                     str(tmp_path)])
+    assert check.main() == expected
+    result = json.loads((tmp_path / "check.json").read_text())
+    assert result["gate"] is (expected == 0)
+    assert result["shapes"] == shapes and result["finite"] is finite
+    assert result["embedding_max_abs"] == (2 if finite else None)
+    assert ("PASS" if expected == 0 else "FAIL") in capsys.readouterr().out
+
+
 def test_comparison_cli_reads_real_run_records_and_writes_both_outputs(tmp_path):
     import shutil
 

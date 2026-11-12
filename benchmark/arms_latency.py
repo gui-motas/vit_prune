@@ -22,7 +22,7 @@ def make_plans(arms, region, attention):
         elif arm == "fixo_1024_mascara":
             plan = PruningPlan(prune_layer=2, budget=FixedBudget(1024), spatial_prior=region,
                                attention=attention)
-        elif arm.startswith(("prog:", "prog-sep:")):
+        elif arm.startswith(("prog:", "prog-sep:", "prog-drop:")):
             parts = arm.split(":", 1)[1].split(",")
             try:
                 initial = int(parts[0])
@@ -33,7 +33,8 @@ def make_plans(arms, region, attention):
                 raise ValueError(f"progressive arm needs later stages: {arm}")
             plan = PruningPlan(prune_layer=2, budget=FixedBudget(initial), spatial_prior=region,
                                attention=attention, stages=stages,
-                               separate_region=arm.startswith("prog-sep:"))
+                               separate_region=arm.startswith("prog-sep:"),
+                               discard_outside=arm.startswith("prog-drop:"))
         else:
             raise ValueError(f"unknown arm: {arm}")
         plan.validate_for(GEOMETRY)
