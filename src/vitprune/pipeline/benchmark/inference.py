@@ -379,6 +379,8 @@ def run_benchmark(bench: Benchmark) -> None:
     policies = {name: read_policy(path, bench.prune_layer, bench.frame_step, bench.weights,
                                   bench.precision) for name, path in files.items()}
     region = read_region(bench.region, GEOMETRY)
+    if bench.progressive_discard and not (region > 0).logical_not().any():
+        raise ValueError("discard region must contain positions outside the region")
     videos = bench.evaluated()
     evaluated = {video.stem: SourceFile.of(video).sha256 for video in videos}
     overlap = {name: calibration_overlap(path, evaluated) for name, path in files.items()}
@@ -423,6 +425,7 @@ def run_benchmark(bench: Benchmark) -> None:
         settings["allow_region_overlap"] = True
     refuse_other_runs(bench.record, settings, bench.policy, bench.region)
     model = load_model(bench)
+    runners = encoders(bench, model, {name: policies[name] for name in files}, region)
     if not bench.record.exists():
         report = check_backbone(model, GEOMETRY, reference=model.forward_features)
         print(report.describe(), flush=True)
@@ -456,7 +459,6 @@ def run_benchmark(bench: Benchmark) -> None:
         policy = policies["legacy_original"]
         print(f"policy {policy.version}, levels {list(policy.levels)}; region "
               f"{float(region.mean()):.0%} of the frame", flush=True)
-    runners = encoders(bench, model, {name: policies[name] for name in files}, region)
     run(bench, model, videos, schedules, runners, region)
     write_manifests(bench, videos, runners)
     print("done", flush=True)

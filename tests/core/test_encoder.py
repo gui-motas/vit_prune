@@ -373,6 +373,138 @@ def test_discard_validation_and_inspection_refusals(backbone, geometry, clips):
         encoder.encode_levels(clips, [32])
 
 
+@pytest.mark.parametrize("keep", [8, 4])
+def test_nonprogressive_discard_pools_large_fp16_values_in_float32(keep, monkeypatch):
+    geometry = reference_geometry(depth=4)
+    backbone = reference_backbone(geometry).half()
+    backbone.blocks = torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)])
+    backbone.fc_norm = torch.nn.Identity()
+    prior = torch.tensor([0.] * 8 + [1.] * 8)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        budget=FixedBudget(keep * 4), spatial_prior=prior, discard_outside=True))
+    monkeypatch.setattr(encoder, "_tokenise", lambda clips: torch.full(
+        (clips.shape[0], geometry.num_tokens, geometry.embed_dim), 2100, dtype=torch.float16))
+    sizes_at_pool, pool = [], encoder._pool
+
+    def observe(tokens, sizes):
+        sizes_at_pool.append(sizes)
+        return pool(tokens, sizes)
+
+    monkeypatch.setattr(encoder, "_pool", observe)
+    result = encoder.encode(torch.zeros(*geometry.input_shape(), dtype=torch.float16))
+    assert sizes_at_pool[0].dtype == torch.float32
+    assert result.dtype == torch.float16
+    assert torch.isfinite(result).all()
+    torch.testing.assert_close(result, torch.full_like(result, 2100))
+
+
+@pytest.mark.parametrize("keep", [8, 4])
+def test_discard_noncontiguous_prior_keeps_correct_tokens_and_scores(keep, monkeypatch):
+    import vitprune.core.encoder as module
+    from vitprune.core.scoring import score_tokens
+
+    torch.manual_seed(11)
+    geometry = reference_geometry(depth=4)
+    backbone = reference_backbone(geometry)
+    positions = [0, 2, 5, 7, 9, 10, 12, 15]
+    weights = torch.tensor([.1, .9, .3, .7, .2, .8, .4, .6])
+    prior = torch.zeros(16)
+    prior[positions] = weights
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        budget=FixedBudget(keep * 4), spatial_prior=prior, discard_outside=True))
+    cut, surviving, score_result, merge_input = [], [], [], []
+    backbone.blocks[1].register_forward_hook(lambda m, a, output: cut.append(output.clone()))
+    backbone.blocks[2].register_forward_pre_hook(lambda m, args: surviving.append(args[0].clone()))
+    with_prior, merge = encoder._with_prior, module.merge_tokens
+
+    def observe_prior(base):
+        result = with_prior(base)
+        score_result.append(result.clone())
+        return result
+
+    def observe_merge(tokens, sizes, scores, count, groups):
+        merge_input.append((tokens.clone(), scores.clone()))
+        return merge(tokens, sizes, scores, count, groups)
+
+    monkeypatch.setattr(encoder, "_with_prior", observe_prior)
+    monkeypatch.setattr(module, "merge_tokens", observe_merge)
+    encoder.encode(torch.randn(*geometry.input_shape(batch=2)))
+    grid = cut[0].reshape(2, 4, 16, geometry.embed_dim)
+    inside = grid[:, :, positions]
+    base = score_tokens(grid, .5)
+    expected_scores = torch.stack([base[:, :, pos] * weight
+                                   for pos, weight in zip(positions, weights, strict=True)], dim=-1)
+    torch.testing.assert_close(score_result[0][:, :, positions], expected_scores)
+    if keep == 8:
+        assert not merge_input
+        torch.testing.assert_close(surviving[0], inside.reshape(2, 32, geometry.embed_dim))
+        return
+
+    torch.testing.assert_close(merge_input[0][0], inside)
+    torch.testing.assert_close(merge_input[0][1], expected_scores)
+    expected = torch.empty(2, 4, keep, geometry.embed_dim)
+    for batch in range(2):
+        for slice_index in range(4):
+            tokens = inside[batch, slice_index]
+            ranked = expected_scores[batch, slice_index].argsort(descending=True)
+            kept = ranked[:keep].sort().values
+            sums = tokens[kept].clone()
+            counts = torch.ones(keep, 1)
+            for index in ranked[keep:]:
+                similarity = torch.nn.functional.cosine_similarity(
+                    tokens[index][None], tokens[kept])
+                destination = similarity.argmax()
+                sums[destination] += tokens[index]
+                counts[destination] += 1
+            expected[batch, slice_index] = sums / counts
+    torch.testing.assert_close(surviving[0], expected.reshape(2, 16, geometry.embed_dim))
+
+
+def test_discard_mixed_adaptive_batch_matches_individual_clips():
+    from vitprune.core.policy import calibrate_policy
+
+    torch.manual_seed(71)
+    geometry = reference_geometry(depth=4)
+    backbone = reference_backbone(geometry)
+    clips = torch.randn(*geometry.input_shape(batch=6))
+    statistics = PrunedEncoder(backbone, geometry, PruningPlan()).statistics(clips)
+    budget = calibrate_policy(statistics, [16, 32])
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        budget=budget, spatial_prior=torch.tensor([0., 1.] * 8), discard_outside=True))
+    embeddings, batch_budget = encoder.encode_with_budget(clips)
+    individual = [encoder.encode_with_budget(clip[None]) for clip in clips]
+    assert set(batch_budget.tokens.tolist()) == {16, 32}
+    assert batch_budget.tokens.tolist() == [item[1].tokens.item() for item in individual]
+    torch.testing.assert_close(embeddings, torch.cat([item[0] for item in individual]),
+                               atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("keep", [8, 4])
+def test_progressive_discard_uses_float32_sizes(dtype, keep, monkeypatch):
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry).to(dtype=dtype)
+    encoder = PrunedEncoder(backbone, geometry, PruningPlan(
+        budget=FixedBudget(keep * 4), spatial_prior=torch.tensor([0., 1.] * 8),
+        discard_outside=True, stages=((3, keep * 2),)))
+    observed, original_run, original_pool = [], encoder._run, encoder._pool
+
+    def run(block, tokens, sizes):
+        if block is backbone.blocks[2]:
+            observed.append(sizes)
+        return original_run(block, tokens, sizes)
+
+    def pool(tokens, sizes):
+        observed.append(sizes)
+        return original_pool(tokens, sizes)
+
+    monkeypatch.setattr(encoder, "_run", run)
+    monkeypatch.setattr(encoder, "_pool", pool)
+    result = encoder.encode(torch.randn(*geometry.input_shape(), dtype=dtype))
+    assert len(observed) == 2 and all(sizes.dtype == torch.float32 for sizes in observed)
+    assert result.dtype == dtype and torch.isfinite(result).all()
+
+
 @pytest.mark.parametrize("split_bias", [True, False])
 def test_stages_allow_qkv_without_a_bias_attribute(split_bias):
     from vitprune.core.testing import ReferenceAttention

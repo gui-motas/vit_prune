@@ -118,6 +118,29 @@ def test_discard_region_overlap_requires_opt_in(bench, model, tmp_path):
     assert record["calibration_overlap"]["--region"]["videos"] == ["v"]
 
 
+@pytest.mark.parametrize("invalid", ["budget", "all_inside", "all_outside"])
+def test_invalid_discard_plan_does_not_block_corrected_retry(bench, model, invalid):
+    bench.policy = None
+    if invalid == "budget":
+        bench.progressive_discard = ((2, 56), (3, 32))
+    else:
+        bench.progressive_discard = ((2, 32), (3, 24))
+        region = json.loads(bench.region.read_text("utf-8"))
+        region["region"]["prior"] = [1. if invalid == "all_inside" else 0.] * 16
+        bench.region.write_text(json.dumps(region), encoding="utf-8")
+    with pytest.raises(ValueError, match="discard|region"):
+        inference.run_benchmark(bench)
+    assert not bench.record.exists()
+    if invalid == "budget":
+        bench.progressive_discard = ((2, 32), (3, 24))
+    else:
+        region["region"]["prior"] = [0.] * 4 + [1.] * 12
+        bench.region.write_text(json.dumps(region), encoding="utf-8")
+    inference.run_benchmark(bench)
+    assert json.loads(bench.record.read_text("utf-8"))["settings"]["progressive_discard"] == [
+        [2, 32], [3, 24]]
+
+
 def test_the_run_writes_what_the_next_steps_read(bench, model, geometry):
     inference.run_benchmark(bench)
 

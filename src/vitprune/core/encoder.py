@@ -463,11 +463,11 @@ class PrunedEncoder(nn.Module):
             if keep == part.shape[2]:
                 group = part.reshape(count, slices * keep, dim)
                 sizes = initial_sizes(part) if self.plan.discard_outside else None
-                if sizes is not None and self.plan.stages:
+                if sizes is not None and (self.plan.stages or self.plan.discard_outside):
                     sizes = sizes.float()
             else:
                 sizes = initial_sizes(part)
-                if self.plan.stages:
+                if self.plan.stages or self.plan.discard_outside:
                     sizes = sizes.float()
                 merged = merge_tokens(part, sizes, scores[members], keep, region)
                 group = merged.tokens.to(part.dtype).reshape(count, slices * keep, dim)
@@ -667,7 +667,7 @@ class PrunedEncoder(nn.Module):
         else:
             flat = sizes.reshape(tokens.shape[0], tokens.shape[1], 1)
             embedding = size_weighted_mean(tokens, flat)
-            if self.plan.stages:
+            if self.plan.stages or self.plan.discard_outside:
                 embedding = embedding.to(tokens.dtype)
 
         final_norm = getattr(self.backbone, "fc_norm", None)
