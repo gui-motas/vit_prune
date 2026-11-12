@@ -575,9 +575,11 @@ grupo de 2 ou mais posições fundidas; cor leve, uma posição isolada; preto, 
 
 No clipe 13522_7 os números são quase iguais (56 e 201 grupos que atravessam fatias).
 
-**Leitura:**
-- **O que a fusão junta:** principalmente regiões homogêneas e estáticas (banco de trás, encosto, parte
-  do volante), tanto dentro da mesma fatia quanto entre fatias.
-- **O que fica fino:** as regiões de detalhe (rosto, mãos) continuam em grupos pequenos.
-- É o comportamento esperado da fusão por similaridade, e explica por que reduzir de 1.352 para 768
-  tokens nos blocos profundos custa pouco na tarefa.
+**Leitura** (inspeção visual da figura, não quantificada):
+- **O que a fusão parece juntar:** os grupos maiores aparecem em regiões homogêneas e estáticas,
+  como o banco de trás e o encosto. Elas se juntam na mesma fatia e também entre fatias.
+- **O que parece ficar fino:** rosto e mãos ficam em grupos menores.
+- **Por que interessa:** é o comportamento esperado de uma fusão por similaridade, e é coerente com
+  reduzir de 1.352 para 768 tokens nos blocos profundos custando pouco na tarefa.
+- **Para afirmar isso como resultado,** falta medir o tamanho dos grupos por região, por exemplo com
+  máscaras de rosto e mãos.
