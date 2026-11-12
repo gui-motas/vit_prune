@@ -73,7 +73,8 @@ def main():
     from vitprune.pipeline.benchmark.settings import GEOMETRY
 
     bench, model, region = setup(args)
-    bench.evaluate = ("13522_7", "31903_7", "33682_5")
+    bench.evaluate = ("Dashboard_user_id_13522_NoAudio_7", "Dashboard_user_id_31903_NoAudio_7",
+                      "Dashboard_user_id_33682_NoAudio_5")
     batches, manifest = sample_batches(bench)
     if len(batches) != 6:
         raise ValueError("need two batches from each of the three dev videos")

@@ -140,6 +140,31 @@ def test_sample_batches_preserve_first_and_middle_schedule():
     assert check.sample_starts(list(range(4))) == [list(range(4))]
 
 
+def test_sep_check_resolves_the_full_dev_video_stems(tmp_path, monkeypatch):
+    from vitprune.pipeline.benchmark.settings import Benchmark
+
+    stems = ("Dashboard_user_id_13522_NoAudio_7", "Dashboard_user_id_31903_NoAudio_7",
+             "Dashboard_user_id_33682_NoAudio_5")
+    for stem in stems:
+        (tmp_path / f"{stem}.MP4").touch()
+    check = load("sep_check")
+    bench = Benchmark(videos=tmp_path, out=tmp_path, policy=None, region=tmp_path / "region.json",
+                      weights=tmp_path / "weights.pth", model_source=tmp_path, masked=(1024,))
+    monkeypatch.setattr(check, "setup", lambda args: (bench, None, None))
+    seen = []
+
+    def sample(benchmark):
+        seen.extend(video.stem for video in benchmark.evaluated())
+        return [], []
+
+    monkeypatch.setattr(check, "sample_batches", sample)
+    monkeypatch.setattr(sys, "argv", ["sep_check.py", "--videos", str(tmp_path), "--region", "r",
+                                      "--weights", "w", "--model-source", "s", "--out", "o"])
+    with pytest.raises(ValueError, match="need two batches"):
+        check.main()
+    assert seen == list(stems)
+
+
 def test_separated_latency_arm_and_diagnostic_counting():
     import torch
 
