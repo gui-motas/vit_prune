@@ -80,6 +80,19 @@ def _rows(bench):
     return [json.loads(line) for line in bench.clips.read_text("utf-8").splitlines()]
 
 
+def test_separated_progressive_run_records_its_plan(bench, model):
+    bench.policy = None
+    bench.progressive = ((2, 32), (3, 24))
+    bench.progressive_separate = True
+    inference.run_benchmark(bench)
+    record = json.loads(bench.record.read_text("utf-8"))
+    assert record["settings"]["progressive_separate"] is True
+    for variant, expected in (("prog_32_24_mascara", False),
+                              ("prog_32_24_mascara_sep", True)):
+        path = bench.features / variant / MANIFEST_NAME
+        assert json.loads(path.read_text("utf-8"))["settings"]["separate_region"] is expected
+
+
 def test_the_run_writes_what_the_next_steps_read(bench, model, geometry):
     inference.run_benchmark(bench)
 

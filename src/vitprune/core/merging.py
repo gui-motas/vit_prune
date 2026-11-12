@@ -54,6 +54,7 @@ def merge_tokens(
     sizes: torch.Tensor,
     scores: torch.Tensor,
     keep: int,
+    groups: torch.Tensor | None = None,
 ) -> MergedTokens:
     """Keep the ``keep`` highest scoring tokens per slice and merge the rest into them.
 
@@ -63,6 +64,8 @@ def merge_tokens(
         scores: ``[batch, slices, tokens]``, as produced by
             :func:`vitprune.core.scoring.score_tokens`.
         keep: how many tokens to keep per temporal slice.
+        groups: optional bool ``[tokens]`` on the token device; cross-group matches
+            are penalized unless no same-group kept token exists in that slice.
 
     Returns:
         A :class:`MergedTokens`.
@@ -73,6 +76,9 @@ def merge_tokens(
     """
     _check_shapes(tokens, sizes, scores)
     total = tokens.shape[2]
+    if groups is not None and (groups.shape != (total,) or groups.dtype != torch.bool
+                               or groups.device != tokens.device):
+        raise ValueError("groups must be a bool tensor [tokens] on the tokens' device")
     if not 1 <= keep <= total:
         raise ValueError(f"keep must be between 1 and {total}, got {keep}")
 
@@ -88,7 +94,8 @@ def merge_tokens(
 
     pruned_tokens = _take(tokens, pruned_at)
     pruned_sizes = _take(sizes, pruned_at)
-    destination = _nearest_kept_token(pruned_tokens, kept_tokens)
+    pair_groups = None if groups is None else (groups[pruned_at], groups[kept_at])
+    destination = _nearest_kept_token(pruned_tokens, kept_tokens, pair_groups)
 
     dim = tokens.shape[-1]
     weighted_sum = (kept_tokens * kept_sizes).clone()
@@ -105,9 +112,14 @@ def merge_tokens(
 
 @torch.no_grad()
 def bipartite_merge(
-    tokens: torch.Tensor, sizes: torch.Tensor, metric: torch.Tensor, keep: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Merge the strongest alternating-partition matches, preserving token mass."""
+    tokens: torch.Tensor, sizes: torch.Tensor, metric: torch.Tensor, keep: int,
+    groups: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Merge the strongest alternating-partition matches, preserving token mass.
+
+    Optional bool ``groups`` has shape ``[batch, tokens]``. Returned groups follow
+    the output order, with each merged token inheriting its destination's group.
+    """
     if tokens.ndim != 3:
         raise ValueError("tokens must be [batch, tokens, embed_dim]")
     batch, count, dim = tokens.shape
@@ -115,19 +127,17 @@ def bipartite_merge(
         raise ValueError("sizes must be [batch, tokens, 1]")
     if metric.ndim != 3 or metric.shape[:2] != (batch, count):
         raise ValueError("metric must be [batch, tokens, channels]")
+    if groups is not None and (groups.shape != (batch, count) or groups.dtype != torch.bool
+                               or groups.device != tokens.device):
+        raise ValueError("groups must be a bool tensor [batch, tokens] on the tokens' device")
     if (isinstance(keep, bool) or not isinstance(keep, Integral)
             or not max(1, count // 2) <= keep <= count):
         raise ValueError(f"keep must be between {max(1, count // 2)} and {count}")
     if keep == count:
-        return tokens, sizes.float()
+        return tokens, sizes.float(), groups
 
     with torch.autocast(device_type=tokens.device.type, enabled=False):
-        metric = F.normalize(metric.float(), dim=-1)
-        similarity = metric[:, ::2] @ metric[:, 1::2].transpose(1, 2)
-        best, destination = similarity.max(dim=-1)
-        order = best.argsort(dim=-1, descending=True).unsqueeze(-1)
-        unmerged, source = order[:, count - keep:], order[:, :count - keep]
-        destination = destination.unsqueeze(-1).gather(1, source)
+        unmerged, source, destination = _bipartite_matches(metric, keep, groups)
 
         weighted = tokens.float() * sizes.float()
         a, b = weighted[:, ::2], weighted[:, 1::2]
@@ -137,12 +147,27 @@ def bipartite_merge(
         sb = sb.scatter_add(1, destination, sa.gather(1, source))
         weighted = torch.cat((a.gather(1, unmerged.expand(-1, -1, dim)), b), dim=1)
         mass = torch.cat((sa.gather(1, unmerged), sb), dim=1)
-        return (weighted / mass).to(tokens.dtype), mass
+        out_groups = None if groups is None else torch.cat(
+            (groups[:, ::2].gather(1, unmerged.squeeze(-1)), groups[:, 1::2]), dim=1)
+        return (weighted / mass).to(tokens.dtype), mass, out_groups
+
+
+def _bipartite_matches(metric: torch.Tensor, keep: int, groups: torch.Tensor | None = None):
+    with torch.autocast(device_type=metric.device.type, enabled=False):
+        metric = F.normalize(metric.float(), dim=-1)
+        similarity = metric[:, ::2] @ metric[:, 1::2].transpose(1, 2)
+        if groups is not None:
+            similarity = similarity - 3.0 * (groups[:, ::2, None] != groups[:, None, 1::2])
+        best, destination = similarity.max(dim=-1)
+        order = best.argsort(dim=-1, descending=True).unsqueeze(-1)
+        unmerged, source = order[:, metric.shape[1] - keep:], order[:, :metric.shape[1] - keep]
+        return unmerged, source, destination.unsqueeze(-1).gather(1, source)
 
 
 @torch.no_grad()
 def merge_error(
-    tokens: torch.Tensor, scores: torch.Tensor, keep: int, merged: MergedTokens
+    tokens: torch.Tensor, scores: torch.Tensor, keep: int, merged: MergedTokens,
+    groups: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """How badly each original token is represented after a merge.
 
@@ -159,7 +184,8 @@ def merge_error(
         ``[batch, slices, tokens]``.
     """
     kept_at = scores.argsort(dim=-1, descending=True)[..., :keep].sort(dim=-1).values
-    destination = _nearest_kept_token(tokens, _take(tokens, kept_at))
+    pair_groups = None if groups is None else (groups.expand_as(scores), groups[kept_at])
+    destination = _nearest_kept_token(tokens, _take(tokens, kept_at), pair_groups)
     # A kept token stands for itself, even when another kept token points the same way.
     own = torch.arange(keep, device=tokens.device).expand_as(kept_at)
     destination = destination.scatter(2, kept_at, own)
@@ -198,15 +224,23 @@ def _take(source: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
     return torch.gather(source, 2, expanded)
 
 
-def _nearest_kept_token(pruned: torch.Tensor, kept: torch.Tensor) -> torch.Tensor:
+def _nearest_kept_token(pruned: torch.Tensor, kept: torch.Tensor,
+                        groups: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
     """For each pruned token, the kept token with the highest cosine similarity.
 
     Similarity ignores magnitude. Two ceiling tokens point the same way even if one
     is better lit, and that equivalence is what the merge exploits.
     """
-    a = F.normalize(pruned.float(), dim=-1)
-    b = F.normalize(kept.float(), dim=-1)
-    return torch.einsum("btid,btjd->btij", a, b).argmax(dim=-1)
+    if groups is None:
+        a = F.normalize(pruned.float(), dim=-1)
+        b = F.normalize(kept.float(), dim=-1)
+        return torch.einsum("btid,btjd->btij", a, b).argmax(dim=-1)
+    with torch.autocast(device_type=pruned.device.type, enabled=False):
+        a = F.normalize(pruned.float(), dim=-1)
+        b = F.normalize(kept.float(), dim=-1)
+        similarity = torch.einsum("btid,btjd->btij", a, b)
+        similarity = similarity - 3.0 * (groups[0][..., :, None] != groups[1][..., None, :])
+        return similarity.argmax(dim=-1)
 
 
 def _check_shapes(tokens: torch.Tensor, sizes: torch.Tensor, scores: torch.Tensor) -> None:

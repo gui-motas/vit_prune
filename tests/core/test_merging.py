@@ -199,7 +199,7 @@ def test_bipartite_merge_preserves_pooled_mean_and_mass(count):
     sizes = torch.rand(2, count, 1) + 0.1
     metric = torch.randn(2, count, 4)
     keep = count - count // 3
-    merged, mass = bipartite_merge(tokens, sizes, metric, keep)
+    merged, mass, _ = bipartite_merge(tokens, sizes, metric, keep)
     assert merged.shape == (2, keep, 8)
     torch.testing.assert_close(mass.sum(1), sizes.sum(1))
     torch.testing.assert_close(size_weighted_mean(merged, mass), size_weighted_mean(tokens, sizes),
@@ -210,7 +210,7 @@ def test_bipartite_merge_keep_all_is_identity():
     from vitprune.core.merging import bipartite_merge
 
     tokens, sizes, metric = torch.randn(2, 5, 3), torch.ones(2, 5, 1), torch.randn(2, 5, 4)
-    merged, mass = bipartite_merge(tokens, sizes, metric, 5)
+    merged, mass, _ = bipartite_merge(tokens, sizes, metric, 5)
     assert merged is tokens and mass is sizes
 
 
@@ -219,7 +219,7 @@ def test_bipartite_merge_merges_most_similar_pair_first():
 
     metric = torch.tensor([[[1., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]])
     tokens = torch.tensor([[[2.], [4.], [8.], [16.]]])
-    merged, sizes = bipartite_merge(tokens, torch.ones(1, 4, 1), metric, 3)
+    merged, sizes, _ = bipartite_merge(tokens, torch.ones(1, 4, 1), metric, 3)
     assert sizes[0, 0, 0] == 1
     assert sizes[0, 1, 0] == 2
     assert merged[0, 1, 0] == 3
@@ -240,7 +240,7 @@ def test_bipartite_merge_low_precision_keeps_float32_mass():
     tokens = torch.randn(2, 12, 4).bfloat16()
     sizes = (torch.rand(2, 12, 1) + 0.2).bfloat16()
     metric = torch.randn(2, 12, 3).bfloat16()
-    merged, mass = bipartite_merge(tokens, sizes, metric, 8)
+    merged, mass, _ = bipartite_merge(tokens, sizes, metric, 8)
     assert merged.dtype == tokens.dtype and mass.dtype == torch.float32
     torch.testing.assert_close(size_weighted_mean(merged.float(), mass.float()),
                                size_weighted_mean(tokens.float(), sizes.float()),
@@ -252,7 +252,7 @@ def test_bipartite_merge_concentrated_bfloat16_mass_is_exact():
 
     tokens = torch.ones(1, 512, 2, dtype=torch.bfloat16)
     sizes = torch.ones(1, 512, 1, dtype=torch.bfloat16)
-    _, mass = bipartite_merge(tokens, sizes, tokens, 256)
+    _, mass, _ = bipartite_merge(tokens, sizes, tokens, 256)
     assert mass.dtype == torch.float32
     assert mass.sum().item() == 512
     assert mass.max().item() == 257
@@ -262,7 +262,7 @@ def test_bipartite_merge_keep_all_promotes_mass():
     from vitprune.core.merging import bipartite_merge
 
     tokens = torch.ones(1, 4, 2, dtype=torch.bfloat16)
-    _, mass = bipartite_merge(tokens, torch.ones(1, 4, 1, dtype=torch.bfloat16), tokens, 4)
+    _, mass, _ = bipartite_merge(tokens, torch.ones(1, 4, 1, dtype=torch.bfloat16), tokens, 4)
     assert mass.dtype == torch.float32
 
 
@@ -286,7 +286,7 @@ def test_bipartite_merge_autocast_preserves_float32_matching():
     with torch.autocast("cpu", dtype=torch.bfloat16):
         actual = bipartite_merge(tokens, sizes, metric, 3)
     for result, reference in zip(actual, expected, strict=True):
-        assert torch.equal(result, reference)
+        assert result is reference if result is None else torch.equal(result, reference)
 
 
 @pytest.mark.parametrize("count", [9, 10])
@@ -320,6 +320,6 @@ def test_bipartite_merge_matches_brute_force(count):
                                            + [w / s for w, s in zip(weighted, totals,
                                                                     strict=True)]))
         expected_sizes.append(torch.stack([mass[a] for a in unmerged] + totals))
-    actual_tokens, actual_sizes = bipartite_merge(tokens, sizes, metric, keep)
+    actual_tokens, actual_sizes, _ = bipartite_merge(tokens, sizes, metric, keep)
     torch.testing.assert_close(actual_tokens, torch.stack(expected_tokens), atol=1e-6, rtol=1e-6)
     torch.testing.assert_close(actual_sizes, torch.stack(expected_sizes), atol=1e-6, rtol=1e-6)

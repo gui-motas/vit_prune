@@ -35,7 +35,7 @@ import json
 import os
 import time
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +124,9 @@ def encoders(bench: Benchmark, model, policies: dict, region) -> dict[str, Prune
             plans[bench.progressive_name] = PruningPlan(
                 prune_layer=layer, budget=FixedBudget(bench.progressive[0][1]),
                 spatial_prior=region, stages=bench.progressive[1:], attention=bench.attention)
+            if bench.progressive_separate:
+                plans[bench.progressive_name + "_sep"] = replace(
+                    plans[bench.progressive_name], separate_region=True)
     else:
         fixed = top_rows_prior(GEOMETRY.grid_size, bench.fixed_rows, bench.fixed_weight)
         priors = {"vitprune": None, "vitprune_mascara_fixa": fixed,
@@ -317,6 +320,7 @@ def write_manifests(bench: Benchmark, videos: list[Path], runners: dict) -> None
                       "policy": plan.budget.version if plan.prunes else None,
                       "size_biased_attention": plan.size_biased_attention,
                       "attention": plan.attention, "stages": [list(stage) for stage in plan.stages],
+                      "separate_region": plan.separate_region,
                       "precision": bench.precision, "device": bench.device,
                       "geometry": asdict(GEOMETRY),
                       "fixed_mask": bench.fixed_mask if name == "vitprune_mascara_fixa" else None,
@@ -403,6 +407,8 @@ def run_benchmark(bench: Benchmark) -> None:
             settings["masked"] = list(bench.masked)
         if bench.progressive:
             settings["progressive"] = [list(stage) for stage in bench.progressive]
+        if bench.progressive_separate:
+            settings["progressive_separate"] = True
     if bench.attention != "model":
         settings["attention"] = bench.attention
     if bench.allow_region_overlap:

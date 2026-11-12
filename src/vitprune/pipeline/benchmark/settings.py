@@ -68,6 +68,7 @@ class Benchmark:
             ``region`` as its spatial prior, ``fixo_<tokens>_mascara``.
         attention: backbone attention implementation, ``model`` or ``sdpa``.
         progressive: cut and later merges as ``(block, tokens)`` pairs.
+        progressive_separate: also compare region-separated progressive merging.
         allow_region_overlap: allow and record a region calibrated on evaluated footage.
     """
 
@@ -95,6 +96,7 @@ class Benchmark:
     attention: str = "model"
     progressive: tuple[tuple[int, int], ...] = ()
     allow_region_overlap: bool = False
+    progressive_separate: bool = False
 
     def __post_init__(self) -> None:
         for name in ("videos", "out", "region", "weights", "model_source"):
@@ -106,6 +108,10 @@ class Benchmark:
         self.masked = tuple(self.masked)
         if self.attention not in ("model", "sdpa"):
             raise ValueError("attention must be 'model' or 'sdpa'")
+        if not isinstance(self.progressive_separate, bool):
+            raise ValueError("progressive_separate must be a bool")
+        if self.progressive_separate and not self.progressive:
+            raise ValueError("--progressive-separate requires --progressive")
         if self.progressive:
             if (not isinstance(self.progressive, (tuple, list))
                     or any(not isinstance(stage, (tuple, list)) or len(stage) != 2
@@ -156,7 +162,8 @@ class Benchmark:
                 *(name for name, _ in self.policies), *(f"fixo_{k}" for k in self.fixed),
                 *(f"fixo_{k}_pa" for k in self.proportional),
                 *(f"fixo_{k}_mascara" for k in self.masked),
-                *((self.progressive_name,) if self.progressive else ()))
+                *((self.progressive_name,) if self.progressive else ()),
+                *((self.progressive_name + "_sep",) if self.progressive_separate else ()))
 
     @property
     def span(self) -> int:

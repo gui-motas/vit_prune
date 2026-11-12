@@ -140,6 +140,44 @@ def test_sample_batches_preserve_first_and_middle_schedule():
     assert check.sample_starts(list(range(4))) == [list(range(4))]
 
 
+def test_separated_latency_arm_and_diagnostic_counting():
+    import torch
+
+    latency = load("arms_latency")
+    region = torch.ones(256)
+    plan = latency.make_plans(["prog-sep:1536,10:1024,20:768"], region, "sdpa")
+    assert plan["prog-sep:1536,10:1024,20:768"].separate_region
+    check = load("sep_check")
+    source = torch.tensor([[False, True, True]])
+    destination = torch.tensor([[True, True, False]])
+    candidates = torch.tensor([[True, True]])
+    assert check.count_cross(source, destination, candidates) == {"cross": 2, "total": 3,
+                                                                 "forced": 1}
+
+
+def test_diagnostic_traces_actual_progressive_encoding():
+    import torch
+
+    from vitprune.core import FixedBudget, PrunedEncoder, PruningPlan
+    from vitprune.core.testing import reference_backbone, reference_geometry
+
+    check = load("sep_check")
+    geometry = reference_geometry(depth=6)
+    backbone = reference_backbone(geometry)
+    prior = torch.tensor([0.] * 8 + [1.] * 8)
+    clips = torch.randn(*geometry.input_shape(batch=2))
+    for separated in (False, True):
+        plan = PruningPlan(budget=FixedBudget(32), stages=((3, 24), (5, 12)),
+                           spatial_prior=prior, separate_region=separated)
+        encoder = PrunedEncoder(backbone, geometry, plan)
+        reference = encoder.encode(clips)
+        embedding, counts = check.diagnose(encoder, clips, prior)
+        assert torch.equal(embedding, reference)
+        assert [counts[str(k)]["total"] for k in (2, 3, 5)] == [64, 16, 24]
+        if separated:
+            assert all(row["cross"] == row["forced"] for row in counts.values())
+
+
 def test_progressive_plan_and_mean_tokens():
     latency = load("arms_latency")
     from vitprune.pipeline.benchmark.settings import GEOMETRY

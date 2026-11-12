@@ -203,9 +203,9 @@ def test_bfloat16_encoder_preserves_mass_through_stages_and_pool(monkeypatch):
     masses = []
 
     def merge(*args):
-        tokens, sizes = original_merge(*args)
+        tokens, sizes, groups = original_merge(*args)
         masses.append(sizes)
-        return tokens, sizes
+        return tokens, sizes, groups
 
     def pool(tokens, sizes):
         masses.append(sizes)

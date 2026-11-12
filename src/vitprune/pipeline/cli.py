@@ -546,6 +546,7 @@ def _run_benchmark_run(args) -> int:
         masked=tuple(args.masked or ()),
         attention=args.attention,
         progressive=progressive,
+        progressive_separate=args.progressive_separate,
         allow_region_overlap=args.allow_region_overlap,
     )
 
@@ -953,6 +954,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--progressive", nargs="+", metavar="TOKENS|BLOCK:TOKENS",
         help="policy study: tokens at the region-guided cut followed by global ToMe-style "
              "BLOCK:TOKENS merges across slices; tokens column records the initial count",
+    )
+    bench_run.add_argument(
+        "--progressive-separate", action="store_true",
+        help="add a progressive variant that separates merges by the driver region",
     )
     bench_run.add_argument(
         "--allow-region-overlap", action="store_true",

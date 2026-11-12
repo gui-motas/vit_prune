@@ -118,8 +118,8 @@ def test_inspection_uses_the_actual_encode_decision(encoder, clips, monkeypatch,
     original = implementation.merge_tokens
     decisions = []
 
-    def observe(tokens, sizes, scores, keep):
-        result = original(tokens, sizes, scores, keep)
+    def observe(tokens, sizes, scores, keep, groups=None):
+        result = original(tokens, sizes, scores, keep, groups)
         decisions.append((scores.clone(), result.sizes.clone()))
         return result
 

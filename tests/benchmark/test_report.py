@@ -367,6 +367,14 @@ def test_a_masked_budget_is_named_for_its_mask():
     assert report.short_label("fixo_768_mascara") == "Fixo 768 + máscara"
 
 
+def test_separated_progressive_names():
+    name = "prog_1536_1024_768_mascara_sep"
+    assert report.variant_name(name) == ("ViT-Prune progressivo 1536→1024→768"
+                                         " + máscara do motorista"
+                                         " + fusão separada pela box")
+    assert report.short_label(name) == "Prog 1536→1024→768 + máscara + sep"
+
+
 def test_a_progressive_budget_is_named_for_its_stages():
     variant = "prog_1536_1024_768_mascara"
     assert report.variant_name(variant) == (
@@ -374,10 +382,11 @@ def test_a_progressive_budget_is_named_for_its_stages():
     assert report.short_label(variant) == "Prog 1536→1024→768 + máscara"
 
 
-def test_a_progressive_variant_can_be_reported(tmp_path):
+@pytest.mark.parametrize("suffix", ["", "_sep"])
+def test_a_progressive_variant_can_be_reported(tmp_path, suffix):
     pytest.importorskip("openpyxl")
     out = _policy_run(tmp_path)
-    variant = "prog_32_24_mascara"
+    variant = "prog_32_24_mascara" + suffix
     for folder in ("features", "ama"):
         (out / folder / "fixo_32_pa").rename(out / folder / variant)
     for file in ("clips.jsonl", "run.json"):
@@ -385,7 +394,8 @@ def test_a_progressive_variant_can_be_reported(tmp_path):
         path.write_text(path.read_text("utf-8").replace("fixo_32_pa", variant), "utf-8")
     book = pd.ExcelFile(report.make_report(out))
     summary = book.parse("Resumo").set_index("Variante")
-    progressive = summary.loc["ViT-Prune progressivo 32→24 + máscara do motorista"]
+    label = "ViT-Prune progressivo 32→24 + máscara do motorista"
+    progressive = summary.loc[label + (" + fusão separada pela box" if suffix else "")]
     assert pd.isna(progressive["Speedup previsto"])
     assert progressive["Speedup medido"] == pytest.approx(2.0)
     assert summary.loc["ViT-Prune fixo 32 tokens", "Speedup previsto"] > 1

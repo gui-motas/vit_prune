@@ -73,6 +73,7 @@ class PruningPlan:
             :mod:`vitprune.core.attention`. Experimental.
         attention: use the backbone's own attention or the explicit SDPA path.
         stages: further (block, tokens per clip) merges after the initial cut.
+        separate_region: penalize merging across ``spatial_prior > 0``; requires a prior.
         budget: what decides how many tokens each clip keeps: an adaptive policy, a
             quality-aware one, or a fixed budget. Without one, nothing is pruned; the cut
             still marks where clip statistics are measured, which is what calibration
@@ -87,6 +88,7 @@ class PruningPlan:
     budget: BudgetPolicy | QualityAwareBudgetPolicy | FixedBudget | None = None
     attention: str = "model"
     stages: tuple[tuple[int, int], ...] = ()
+    separate_region: bool = False
 
     def __post_init__(self) -> None:
         validate_prune_layer(self.prune_layer)
@@ -100,6 +102,10 @@ class PruningPlan:
                              "the first slice without a score")
         if not isinstance(self.size_biased_attention, bool):
             raise ValueError("size_biased_attention must be a bool")
+        if not isinstance(self.separate_region, bool):
+            raise ValueError("separate_region must be a bool")
+        if self.separate_region and self.spatial_prior is None:
+            raise ValueError("separate_region requires spatial_prior")
         if self.attention not in ("model", "sdpa"):
             raise ValueError("attention must be 'model' or 'sdpa'")
         if self.spatial_prior is not None:
@@ -176,6 +182,8 @@ class PruningPlan:
         extra = attention + (", size-biased attention" if self.size_biased_attention else "")
         if self.spatial_prior is not None:
             extra += ", spatial prior"
+        if self.separate_region:
+            extra += ", separate region merging"
         if self.stages:
             extra += ", stages " + " ".join(f"{block}:{tokens}" for block, tokens in self.stages)
         levels = "/".join(str(level) for level in self.budget.levels)
@@ -303,7 +311,8 @@ class PrunedEncoder(nn.Module):
         for keep, members in self._groups(keeps):
             part, part_scores = grid[members], scores[members]
             ranking = part_scores.argsort(dim=-1, descending=True)
-            merged = merge_tokens(part, initial_sizes(part), part_scores, keep)
+            merged = merge_tokens(part, initial_sizes(part), part_scores, keep,
+                                  self._region_groups(part.device))
             kept[members, :, :keep] = ranking[..., :keep].sort(dim=-1).values
             sizes[members, :, :keep] = merged.sizes.squeeze(-1)
 
@@ -379,9 +388,10 @@ class PrunedEncoder(nn.Module):
                 group, sizes = grid.reshape(count, slices * keep, dim), None
                 errors[level] = grid.new_zeros(grid.shape[:3])
             else:
-                merged = merge_tokens(grid, initial_sizes(grid), scores, keep)
+                groups = self._region_groups(grid.device)
+                merged = merge_tokens(grid, initial_sizes(grid), scores, keep, groups)
                 group, sizes = merged.tokens.reshape(count, slices * keep, dim), merged.sizes
-                errors[level] = merge_error(grid, scores, keep, merged)
+                errors[level] = merge_error(grid, scores, keep, merged, groups)
             stages[level] = {}
             if cut in depths:
                 stages[level][cut] = self._mean(group, sizes)
@@ -422,13 +432,18 @@ class PrunedEncoder(nn.Module):
         for keep, members in self._groups(keeps):
             part = grid[members]
             count, slices, _, dim = part.shape
+            region = self._region_groups(part.device)
+            groups = None
+            if region is not None:
+                kept_at = scores[members].argsort(dim=-1, descending=True)[..., :keep]
+                groups = region[kept_at.sort(dim=-1).values].reshape(count, slices * keep)
             if keep == self.geometry.tokens_per_slice:
                 group, sizes = part.reshape(count, slices * keep, dim), None
             else:
                 sizes = initial_sizes(part)
                 if self.plan.stages:
                     sizes = sizes.float()
-                merged = merge_tokens(part, sizes, scores[members], keep)
+                merged = merge_tokens(part, sizes, scores[members], keep, region)
                 group = merged.tokens.to(part.dtype).reshape(count, slices * keep, dim)
                 sizes = merged.sizes
             stages = dict(self.plan.stages)
@@ -439,8 +454,8 @@ class PrunedEncoder(nn.Module):
                         sizes = torch.ones((*group.shape[:2], 1), device=group.device)
                     else:
                         sizes = sizes.reshape(count, -1, 1)
-                    group, sizes = bipartite_merge(
-                        group, sizes, self._stage_keys(blocks[index], group), stages[index]
+                    group, sizes, groups = bipartite_merge(
+                        group, sizes, self._stage_keys(blocks[index], group), stages[index], groups
                     )
             pooled = self._pool(group, sizes)
             if embeddings is None:
@@ -486,6 +501,9 @@ class PrunedEncoder(nn.Module):
     def _with_prior(self, base: torch.Tensor) -> torch.Tensor:
         prior = self.plan.spatial_prior
         return base if prior is None else apply_prior(base, prior)
+
+    def _region_groups(self, device: torch.device) -> torch.Tensor | None:
+        return (self.plan.spatial_prior.to(device) > 0) if self.plan.separate_region else None
 
     @staticmethod
     def _groups(keeps: torch.Tensor):

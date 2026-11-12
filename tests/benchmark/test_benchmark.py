@@ -274,6 +274,20 @@ def test_progressive_options_come_from_the_command_line(tmp_path, monkeypatch):
     assert bench.policy_study and bench.attention == "sdpa" and bench.allow_region_overlap
 
 
+def test_separated_progressive_flag_adds_an_arm_and_requires_progressive(tmp_path, monkeypatch):
+    pytest.importorskip("cv2")
+    from vitprune.pipeline.benchmark import inference
+
+    seen = []
+    monkeypatch.setattr(inference, "run_benchmark", seen.append)
+    assert main(_run_command(tmp_path, "--progressive-separate")) == 2
+    assert main(_run_command(tmp_path, "--progressive", "1536", "10:1024", "20:768",
+                             "--progressive-separate")) == 0
+    assert seen[0].progressive_separate
+    assert seen[0].variants == ("denso", "legacy_original", "prog_1536_1024_768_mascara",
+                                "prog_1536_1024_768_mascara_sep")
+
+
 @pytest.mark.parametrize("progressive", [
     ("1001", "10:768"), ("1536",), ("1536", "bad"), ("1536", "10:xx"),
     ("1536", "2:1024"), ("1536", "40:1024"), ("1536", "10:512"),
