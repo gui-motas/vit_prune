@@ -290,7 +290,15 @@ sem sobreposição.
 | Prioridade | Candidato | Configuração | Medido no dev |
 |---|---|---|---|
 | **Preservar a qualidade** | Denso FP16 + SDPA | `--precision fp16 --attention sdpa`, sem poda (`PruningPlan.dense(attention="sdpa")` sob `autocast` fp16) | 355 ms/clipe (5,7×); 48/48 ações, 2 FP, mAP 1,000; idêntico ao denso FP32 na tarefa |
-| **Latência** | Progressivo FP16 + SDPA | `--precision fp16 --attention sdpa --progressive 1536 10:1024 20:768` com a box (`PruningPlan(prune_layer=2, budget=FixedBudget(1536), spatial_prior=box, stages=((10, 1024), (20, 768)), attention="sdpa")`) | 163 ms/clipe (12,5×); 46/48 ações, 2 FP, mAP 0,990; perde 13522_7 classe 5 e 31903_7 classe 6 |
+| **Latência** (atual, desde 12/11) | **P-drop FP16 + SDPA** — fundo descartado no corte | `--precision fp16 --attention sdpa --progressive-discard 1352 10:1024 20:768` com a box (`PruningPlan(prune_layer=2, budget=FixedBudget(1352), spatial_prior=box, discard_outside=True, stages=((10, 1024), (20, 768)), attention="sdpa")`) | 151,6 ms/clipe (≈13,4×; 2,28× sobre o denso FP16+SDPA); 48/48 ações, 2 FP (os mesmos do denso), mAP 1,000. Ver a §7 |
+| Latência (anterior, substituído) | Progressivo FP16 + SDPA | `--precision fp16 --attention sdpa --progressive 1536 10:1024 20:768` com a box (`PruningPlan(prune_layer=2, budget=FixedBudget(1536), spatial_prior=box, stages=((10, 1024), (20, 768)), attention="sdpa")`) | 163 ms/clipe (12,5×); 46/48 ações, 2 FP, mAP 0,990; perde 13522_7 classe 5 e 31903_7 classe 6 |
+
+**Status do P-drop:**
+- é candidato **pendente de confirmação** no holdout (35418, 36305), com uma box calibrada sem esses
+  motoristas;
+- depende inteiramente da box, mais que qualquer outro braço (§7);
+- substituiu o progressivo como candidato de latência em 12/11, por decisão do responsável, depois do
+  veredito "melhora" pela regra pré-registrada.
 
 O denso FP16+SDPA continua sendo a referência de qualidade para o candidato de latência. O U-1024 fica
 como linha de base de comparação, não como candidato: com o mesmo custo, ele tem 2 FPs a mais que o
@@ -428,3 +436,51 @@ O U-1024 não entrou nesta execução. A linha dele só traz a latência, medida
   (35418, 36305), com uma box sem sobreposição, é condição para adotá-lo.
 - **Candidatos:** o P-drop é o candidato natural para a prioridade de latência, no lugar do P. A troca
   na §5 fica para a decisão do responsável e para a confirmação fora do conjunto de dev.
+
+### 7.1 Poda ou fusão? Como classificar o P-drop
+
+Entre todos os braços testados, o P-drop é o único que **descarta tokens de verdade**. Todos os outros
+(U-1024, P, P-sep e as políticas da QABP) reduzem tokens só por **fusão**: o que sai é incorporado,
+por média ponderada, num token que fica.
+
+**De onde vem a economia** (tokens × blocos, sobre os 81.920 do denso; as camadas lineares dominam o custo,
+§3):
+
+| Braço | Economia | Por descarte (poda) | Por fusão |
+|---|---:|---:|---:|
+| U-1024 | 38.912 (47,5%) | 0% | 100% |
+| P | 39.936 (48,8%) | 0% | 100% |
+| **P-drop** | **41.408 (50,5%)** | **63,9%** (696 tokens × 38 blocos) | **36,1%** (ToMe nos blocos 10 e 20) |
+
+**Classificação.** O P-drop é um método **híbrido**:
+- **Poda espacial** guiada por região: os tokens de fora da box são descartados depois do bloco 2. Essa
+  parte responde por ~64% da economia.
+- **Fusão por similaridade** (ToMe) nos blocos 10 e 20, responsável pelos outros ~36%.
+
+Na taxonomia da literatura, isso o põe entre os métodos que combinam poda e fusão (ToFu, PPT,
+DiffRate), com a particularidade de que a poda é decidida por uma região, e não por um escore de
+importância. Dentre os braços testados, é o que melhor corresponde ao nome *ViT-Prune*: é o único em que a
+poda, no sentido estrito de descartar tokens, acontece de fato, e é ela que carrega a maior parte da
+economia.
+
+Dois cuidados para descrever o método com precisão:
+1. **No P-drop, o escore de unicidade × movimento não decide nada.** Com 1.352 tokens, todas as 169
+   posições da box ficam, e o que é podado é decidido só pela box. O escore só voltaria a pesar com um
+   orçamento abaixo de 169 por fatia.
+2. **A box é parte do método.** Ela vem de um detector de pessoas (YOLO26s), calibrado por mediana nos
+   vídeos de ajuste. A qualidade da poda depende de ela cobrir o motorista em motoristas novos, e é isso
+   que o holdout precisa confirmar.
+
+**A trajetória das ablações, como uma escada** (cada degrau muda um fator; FP16+SDPA, 3 vídeos de dev):
+
+| Degrau | Mudança | Ações | FP | mAP | ms/clipe |
+|---|---|---:|---:|---:|---:|
+| Denso FP32 | linha de base | 48 | 2 | 1,000 | 2.034 |
+| Denso FP16+SDPA | precisão e kernel | 48 | 2 | 1,000 | 346–355 |
+| U-1024 | corte único no bloco 2 (escore + box) e fusão no mais parecido | 46 | 4 | 0,977 | 161–169 |
+| P | redução em etapas (1536 → 1024 → 768), fusão ToMe | 46 | 2 | 0,990 | 158–163 |
+| P-sep | fusão proibida entre fundo e motorista | 48 | 4 | 0,990 | 158 |
+| **P-drop** | **fundo descartado no corte** | **48** | **2** | **1,000** | **152** |
+
+As latências em faixa vêm de sessões diferentes (§3, §6, §7). As razões entre braços medidas na mesma
+sessão são estáveis.
