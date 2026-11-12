@@ -191,64 +191,89 @@ Fronteira custo × qualidade nos 3 vídeos de dev, com latência do §3 e speedu
 | U-1024 FP16+SDPA | 169 | 12,0× | 46/48 | 4 | 0,977 |
 | **P FP16+SDPA** | **163** | **12,5×** | **46/48** | **2** | **0,990** |
 
+As figuras desta seção (1–5) são geradas por `benchmark/fp16_figures.py`. As fontes são:
+- `fp16-sdpa/comparacao.json` (FP32: execução A) e `fp16-sdpa/drop/comparacao.json` (FP16+SDPA, execução
+  `drop`; o U-1024 FP16 vem da B2);
+- `latency-fp32/latency.json` (11/11) e `drop/latency-fp16/latency.json`, que mede os 5 braços FP16 na
+  mesma sessão (12/11);
+- as predições do AMA.
+
 ![Fronteira latência × qualidade](figuras-fp16-progressivo/fronteira.png)
 
 *Figura 1.* Latência p50 por clipe (`arms_latency.py`, escala log) contra as ações reencontradas e
-contra o mAP. A cor indica o braço e o marcador indica o modo (círculo vazado = FP32 com a atenção
-original; quadrado = FP16+SDPA). O pontilhado liga o mesmo braço nos dois modos. U-1024 e P têm as mesmas
-46 ações, e por isso os pontos se sobrepõem no painel da esquerda. A diferença entre eles aparece no mAP
-e nos FPs.
+contra o mAP.
+- **Cores e marcadores:** a cor indica o braço, e o marcador o modo (círculo vazado = FP32 com a atenção
+  original; quadrado = FP16+SDPA). O pontilhado liga o mesmo braço nos dois modos.
+- **Os braços com poda em FP16** se concentram entre 150 e 161 ms. Lá, o **P-drop** é o único que tem
+  ações, FPs e mAP iguais aos do denso, e ainda é o mais rápido (151,6 ms).
+- **U-1024 e P** têm as mesmas 46 ações; a diferença entre eles aparece no mAP e nos FPs.
+- **P-sep** chega às 48 ações, mas com 4 FPs.
 
 ![Linha do tempo das detecções por braço](figuras-fp16-progressivo/linha-do-tempo.png)
 
-*Figura 2.* Detecções do AMA com confiança ≥ 0,30 nos 3 vídeos de dev.
+*Figura 2.* Detecções do AMA com confiança ≥ 0,30 nos 3 vídeos de dev, em 9 linhas: as anotações, os 3
+braços em FP32 e os 5 em FP16+SDPA.
 - **Cores:** a cor indica a classe, e quanto mais opaca a barra, mais confiante a detecção.
 - **Contorno preto:** falso positivo.
 - **✗ vermelho:** ação anotada que o braço perdeu: 13522_7 classe 5 (o AMA a confunde com a classe 8,
-  e o denso também gera esse FP) e 31903_7 classe 6.
-- **Os dois modos:** FP32 (em cima) e FP16+SDPA (embaixo) dão o mesmo padrão.
+  e o denso também gera esse FP) e 31903_7 classe 6. Só U-1024 e P perdem ações.
 - **FPs por braço:**
-  - o denso tem os de classe 8 e 12;
-  - o progressivo, os de classe 8 e 10;
-  - o U-1024 tem esses dois e ainda o de classe 12 (13522_7, ~450 s) e o de classe 9 (31903_7,
-    ~160 s).
-
-As figuras desta seção (1–5) são geradas por `benchmark/fp16_figures.py` a partir de `fp16-sdpa/comparacao.json`,
-dos `latency-fp*/latency.json` e das predições do AMA.
+  - o denso e o P-drop têm os mesmos, de classe 8 e 12;
+  - o P tem os de classe 8 e 10;
+  - o P-sep tem os de classe 8, 10, 12 e 1;
+  - o U-1024 tem os de classe 8, 10, 12 e 9.
+- **Os dois modos** dão o mesmo padrão para U-1024 e P.
 
 ![Tokens por bloco](figuras-fp16-progressivo/tokens-por-bloco.png)
 
-*Figura 3.* Tokens processados em cada um dos 40 blocos.
-- **Custo:** a área sob a curva é proporcional ao custo das camadas lineares, que dominam o FLOP do
-  bloco.
-- **Comparação com o U-1024:** o progressivo mantém mais tokens nos blocos 3–10 e menos nos blocos
-  21–40. A média ao longo dos blocos é de 1.049,6 tokens, contra 1.075,2 do U-1024.
+*Figura 3.* Tokens processados em cada um dos 40 blocos. A área sob a curva é proporcional ao custo das
+camadas lineares, que dominam o FLOP do bloco.
 
-![Fidelidade do FP16 frente à poda](figuras-fp16-progressivo/fidelidade-fp16.png)
+| Braço | Média de tokens por bloco | Como reduz |
+|---|---:|---|
+| U-1024 | 1.075,2 | fusão |
+| P e P-sep | 1.049,6 | fusão |
+| P-drop | 1.012,8 | descarte do fundo no corte (poda) e depois fusão |
+
+![Fidelidade ao denso](figuras-fp16-progressivo/fidelidade-fp16.png)
 
 *Figura 4.* Distância (1 − cosseno) entre o embedding de cada clipe e o do denso FP32, nos 2.763 clipes,
-em escala log.
+em escala log. Todos os braços estão em FP16+SDPA.
 
-| | Mediana do cosseno | Top-1 da cabeça igual ao denso FP32 |
+| Braço (FP16+SDPA) | Mediana do cosseno | Top-1 da cabeça igual ao denso FP32 |
 |---|---:|---:|
-| Denso FP16+SDPA | 0,999998 | 99,86% (4 clipes diferem) |
-| U-1024 FP32 | 0,774 | 65,7% |
-| Progressivo FP32 | 0,835 | 68,6% |
+| Denso | 0,999998 | 99,86% (4 clipes diferem) |
+| U-1024 | 0,776 | 65,4% |
+| P | 0,840 | 69,1% |
+| P-sep | 0,875 | 72,4% |
+| **P-drop** | **0,979** | **91,6%** |
 
-- **Precisão contra poda:** o erro do FP16+SDPA fica cinco ordens de grandeza abaixo do erro da poda.
-- **Progressivo contra U-1024:** o progressivo fica mais perto do denso. O P10 do cosseno é 0,554,
-  contra 0,481 do U-1024.
+- **Precisão contra redução de tokens:** o erro do FP16+SDPA fica cinco ordens de grandeza abaixo do erro
+  de qualquer redução de tokens.
+- **O fundo explica a maior parte do desvio:** separar a fusão (P-sep) aproxima o embedding do denso, e
+  descartar o fundo (P-drop) aproxima ainda mais, de 0,840 para 0,979.
+  - O resultado contradiz a expectativa de que descartar o fundo afastaria o embedding, por ele virar a
+    média só da região do motorista.
+  - Ele indica que boa parte do desvio diagnosticado no P0, que nasce nos blocos profundos, vinha de
+    tokens do motorista contaminados pelo fundo fundido neles.
 
 ![Scores pareados por ação](figuras-fp16-progressivo/scores-pareados.png)
 
-*Figura 5.* Score do AMA de cada ação anotada no U-1024 (x) e no progressivo (y), com a cor dada pelo
-score do denso.
-- **Ações perdidas:** os círculos vermelhos são as 2 ações que os dois braços perdem. Elas aparecem com
-  a melhor detecção da classe certa, abaixo do corte de 0,30.
-- **Deslocamento:** não há deslocamento sistemático. A mediana de P − U é −0,001 em FP32 e 0,000 em
-  FP16. P fica acima em 20 de 46 em FP32 e em 22 de 46 em FP16.
-- **Ações destacadas:** a ação frágil 13522_7, classe 6, sobe de ~0,31 para ~0,5. A 33682_5, classe 8,
-  sobe de ~0,74 para ~0,84, perto do denso (0,84).
+*Figura 5.* Score do AMA de cada ação anotada, braço contra braço, com a cor dada pelo score do denso.
+Os círculos vermelhos são ações perdidas por um dos braços, mostradas com a melhor detecção da classe
+certa.
+
+| Painel | Mediana da diferença | Braço do eixo y acima em |
+|---|---:|---:|
+| U-1024 × P (FP32) | −0,001 | 20 de 46 |
+| U-1024 × P (FP16) | −0,001 | 21 de 46 |
+| P × P-drop (FP16) | **+0,027** | **33 de 46** |
+
+- **U-1024 × P:** não há deslocamento sistemático.
+- **P × P-drop:** o P-drop fica acima em quase todas as ações. Ele recupera 31903_7 classe 6 (de ~0,16
+  para 0,75) e 13522_7 classe 5 (0,31, perto do corte).
+- **Execuções:** o P FP16 aqui é o da execução `drop` (código atual). O painel FP16 de U-1024 × P usa a
+  B2 para o U-1024 e a `drop` para o P.
 
 1. **FP16 + SDPA é a melhoria dominante.**
    - **O denso** fica 5,7× mais rápido sem nenhuma mudança na tarefa: as mesmas 48 ações, os mesmos 2 FPs
@@ -484,3 +509,75 @@ Dois cuidados para descrever o método com precisão:
 
 As latências em faixa vêm de sessões diferentes (§3, §6, §7). As razões entre braços medidas na mesma
 sessão são estáveis.
+
+## 8. Como a poda acontece no vídeo
+
+As figuras desta seção vêm de `benchmark/pruning_visual.py`:
+- **Modo:** FP16+SDPA, o modo dos candidatos.
+- **Clipes:** dois clipes de dev, cada um no meio de uma das 2 ações que só o P-drop recupera:
+  - 31903_7, ação de classe 6 (469–490 s);
+  - 13522_7, ação de classe 5 (122–142 s).
+- **Como foi feito:** o script refaz o caminho do encoder passo a passo, registrando para onde vai cada
+  posição da grade.
+- **Autoverificação:** o embedding refeito é igual ao do `PrunedEncoder` real, com |Δ| máximo = 0, para
+  U-1024, P e P-drop nos dois clipes.
+- **Grade:** é a de 16×16 do modelo, desenhada sobre o quadro em 16:9. O modelo recebe o quadro
+  redimensionado para 224×224, sem recorte.
+
+![Região do motorista](figuras-fp16-progressivo/poda-box.png)
+
+*Figura 6.* A box do motorista (`regiao-ajuste.json`): 169 das 256 posições de cada fatia. Ficam fora as 3
+linhas de cima (teto), a coluna da esquerda e as 2 da direita (janelas).
+
+![Corte no bloco 2, 31903_7](figuras-fp16-progressivo/poda-corte-31903-7.png)
+
+![Corte no bloco 2, 13522_7](figuras-fp16-progressivo/poda-corte-13522-7.png)
+
+*Figura 7.* O corte depois do bloco 2 na fatia temporal central, por braço.
+
+| Braço | Mantidos | Destino dos outros | % dentro da box |
+|---|---:|---|---:|
+| U-1024 | 128 de 256 | 128 fundidos | 100% |
+| P | 192 | 64 fundidos | 88% (169 + 23 de fora) |
+| P-drop | 169 (a box inteira) | 87 descartados | 100% |
+
+- **U-1024:** os 128 de maior score (unicidade × movimento) dentro da box ficam, e os outros 128 se fundem
+  neles.
+- **P:** 64 tokens são fundidos, todos do fundo. Pelo diagnóstico da §6, quase todos vão parar dentro de
+  tokens do motorista.
+- **P-drop:** o fundo some, sem se fundir em nada.
+- **Leitura:** a diferença entre P e P-drop está no que acontece com o fundo (fundido ou descartado), não
+  em quais tokens do motorista ficam.
+
+![P-drop nas 8 fatias](figuras-fp16-progressivo/poda-fatias-31903-7.png)
+
+![U-1024 nas 8 fatias](figuras-fp16-progressivo/poda-fatias-u1024-31903-7.png)
+
+*Figura 8.* As 8 fatias temporais do clipe (16 quadros, 2 por fatia).
+- **No P-drop,** a poda é a mesma em todas as fatias, porque a box é fixa.
+- **No U-1024,** a escolha dos 128 por fatia muda de fatia para fatia, conforme o score de unicidade ×
+  movimento.
+
+![Fusões ToMe no P-drop](figuras-fp16-progressivo/poda-tome-31903-7.png)
+
+*Figura 9.* A origem de cada token no P-drop. Cada cor é um token representante. Cor forte indica um
+grupo de 2 ou mais posições fundidas; cor leve, uma posição isolada; preto, descartado.
+
+1. **Em cima:** a fatia central depois do corte (1.352 tokens, nenhum grupo), depois do bloco 10 (1.024)
+   e depois do bloco 20 (768).
+2. **Embaixo:** as fatias 2 e 6 depois do bloco 20, com as mesmas cores. Uma cor que aparece em fatias
+   diferentes é um grupo que juntou o mesmo conteúdo ao longo do tempo.
+
+| Depois do bloco | Grupos que atravessam fatias | Tamanho médio / máximo do grupo | Posições mantidas em grupos de ≥ 2 |
+|---|---:|---:|---:|
+| 10 (1.024 tokens) | 65 | 1,32 / 5 | 43% |
+| 20 (768 tokens) | 203 | 1,76 / 8 | 68% |
+
+No clipe 13522_7 os números são quase iguais (56 e 201 grupos que atravessam fatias).
+
+**Leitura:**
+- **O que a fusão junta:** principalmente regiões homogêneas e estáticas (banco de trás, encosto, parte
+  do volante), tanto dentro da mesma fatia quanto entre fatias.
+- **O que fica fino:** as regiões de detalhe (rosto, mãos) continuam em grupos pequenos.
+- É o comportamento esperado da fusão por similaridade, e explica por que reduzir de 1.352 para 768
+  tokens nos blocos profundos custa pouco na tarefa.

@@ -21,8 +21,18 @@ ARMS = [
     ("fixo_1024_mascara", "fixo_1024_mascara", "U-1024", "U-1024 + máscara", "#ff7f0e"),
     ("prog_1536_1024_768_mascara", "prog:1536,10:1024,20:768", "Prog",
      "Progressivo 1536→1024→768 + máscara", "#2ca02c"),
+    ("prog_1536_1024_768_mascara_sep", "prog-sep:1536,10:1024,20:768", "P-sep",
+     "P-sep (fusão separada pela box)", "#9467bd"),
+    ("prog_1352_1024_768_mascara_drop", "prog-drop:1352,10:1024,20:768", "P-drop",
+     "P-drop (fundo descartado)", "#d62728"),
 ]
-MODES = [("a", "FP32", "latency-fp32", "o"), ("b2", "FP16+SDPA", "latency-fp16", "s")]
+ROWS = [("a", i, "FP32") for i in range(3)] + [
+    (run, i, "FP16+SDPA") for i, run in enumerate(("drop", "b2", "drop", "drop", "drop"))
+]
+
+
+def run_path(run):
+    return ROOT / ("drop/run" if run == "drop" else run)
 
 
 def action_score(arm):
@@ -31,16 +41,20 @@ def action_score(arm):
 
 def plot_tokens():
     schedules = [np.full(40, 2048), np.array([2048] * 2 + [1024] * 38),
-                 np.array([2048] * 2 + [1536] * 8 + [1024] * 10 + [768] * 20)]
-    assert np.allclose([s.mean() for s in schedules], [2048, 1075.2, 1049.6])
+                 np.array([2048] * 2 + [1536] * 8 + [1024] * 10 + [768] * 20),
+                 np.array([2048] * 2 + [1352] * 8 + [1024] * 10 + [768] * 20)]
+    assert np.allclose([s.mean() for s in schedules], [2048, 1075.2, 1049.6, 1012.8])
     fig, ax = plt.subplots(figsize=(10, 4.5))
     edges = np.arange(0.5, 41.5)
-    for schedule, (_, _, _, label, color) in zip(schedules, ARMS, strict=True):
+    for schedule, (_, _, _, label, color) in zip(schedules, [*ARMS[:3], ARMS[4]], strict=True):
+        if color == ARMS[2][4]:
+            label = "P / P-sep 1536→1024→768 + máscara"
         mean = f"{schedule.mean():.1f}".replace(".0", "").replace(".", ",")
         ax.stairs(schedule, edges, color=color, linewidth=2, label=f"{label} (média {mean})")
         if label != "Denso":
             ax.stairs(schedule, edges, fill=True, color=color, alpha=0.15)
-    for x, label in [(2.5, "corte com score + box"), (10.5, "fusão ToMe"),
+    for x, label in [(2.5, "corte com score + box (fusão)\ndescarte do fundo (poda)"),
+                     (10.5, "fusão ToMe"),
                      (20.5, "fusão ToMe")]:
         ax.axvline(x, color="0.45", linestyle=":", linewidth=1)
         ax.text(x + 0.2, 200, label, rotation=90, fontsize=8, color="0.35")
@@ -54,16 +68,14 @@ def plot_tokens():
 
 
 def plot_fidelity(videos):
-    series = [("b2", ARMS[0], "Denso FP16+SDPA"),
-              ("a", ARMS[1], "U-1024 FP32"), ("a", ARMS[2], "Progressivo FP32")]
+    series = [(run, ARMS[i], ARMS[i][2]) for run, i, _ in ROWS[3:]]
     distances = [[] for _ in series]
     agreements = [[] for _ in series]
     for video in videos:
         data = {}
-        for run, _, _, _ in MODES:
-            for variant, _, _, _, _ in ARMS:
-                with np.load(ROOT / run / "features" / variant / f"{video}.npz") as f:
-                    data[run, variant] = (f["feats"], f["a_prob"])
+        for run, variant in [("a", "denso"), *((run, arm[0]) for run, arm, _ in series)]:
+            with np.load(run_path(run) / "features" / variant / f"{video}.npz") as f:
+                data[run, variant] = (f["feats"], f["a_prob"])
         ref, ref_prob = data["a", "denso"]
         assert all(len(feats) == len(prob) == len(ref) for feats, prob in data.values())
         ref = ref.astype(np.float64)
@@ -97,7 +109,7 @@ def plot_fidelity(videos):
     ax.set_xscale("log")
     ax.set(xlim=(1e-8, 1), xlabel="1 − cosseno com o denso FP32 (escala log)",
            ylabel="Número de clipes por intervalo",
-           title="Distância ao embedding denso FP32 por clipe (2.763 clipes): precisão × poda")
+           title="Distância ao embedding denso FP32 por clipe (FP16+SDPA, 2.763 clipes)")
     ax.legend(loc="upper left", fontsize=8)
     ax.text(0.52, 0.97, "\n".join(summaries), transform=ax.transAxes, ha="center", va="top",
             fontsize=8, bbox=dict(facecolor="white", edgecolor="0.8", alpha=0.9))
@@ -110,20 +122,23 @@ def plot_fidelity(videos):
 
 
 def plot_scores(actions):
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5), sharex=True, sharey=True)
-    for ax, (run, title) in zip(axes, [("a", "FP32 + atenção original"),
-                                       ("b2", "FP16 + SDPA")], strict=True):
-        fixed = [a["arms"][f"{run}/{ARMS[1][0]}"] for a in actions]
-        prog = [a["arms"][f"{run}/{ARMS[2][0]}"] for a in actions]
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharex=True, sharey=True)
+    panels = [("a", 1, "a", 2, "a", "FP32 + atenção original"),
+              ("b2", 1, "drop", 2, "drop", "FP16 + SDPA"),
+              ("drop", 2, "drop", 4, "drop", "P × P-drop (FP16+SDPA)")]
+    for ax, (xrun, xi, yrun, yi, dense_run, title) in zip(axes, panels, strict=True):
+        fixed = [a["arms"][f"{xrun}/{ARMS[xi][0]}"] for a in actions]
+        prog = [a["arms"][f"{yrun}/{ARMS[yi][0]}"] for a in actions]
         x = np.array([action_score(a) for a in fixed])
         y = np.array([action_score(a) for a in prog])
-        dense = np.array([action_score(a["arms"][f"{run}/denso"]) for a in actions])
+        dense = np.array([action_score(a["arms"][f"{dense_run}/denso"]) for a in actions])
         recovered = np.array([u["recovered"] and p["recovered"]
                               for u, p in zip(fixed, prog, strict=True)])
         diff = y[recovered] - x[recovered]
         median, greater = np.median(diff), np.count_nonzero(diff > 0)
-        print(f"Scores {title}: mediana Prog−U={median:.6f}; "
-              f"Prog>U={greater}/{len(diff)}; perdidas={len(actions) - len(diff)}")
+        xname, yname = ("U", "P") if xi == 1 else ("P", "P-drop")
+        print(f"Scores {title}: mediana {yname}−{xname}={median:.6f}; "
+              f"{yname}>{xname}={greater}/{len(diff)}; perdidas={len(actions) - len(diff)}")
         ax.plot([0, 1], [0, 1], color="0.6", linewidth=0.8)
         ax.axvline(0.30, color="0.5", linestyle="--", linewidth=0.8)
         ax.axhline(0.30, color="0.5", linestyle="--", linewidth=0.8)
@@ -131,8 +146,10 @@ def plot_scores(actions):
                             vmin=0, vmax=1, s=35, zorder=3)
         ax.scatter(x[~recovered], y[~recovered], facecolors="none", edgecolors="red",
                    s=55, linewidths=1.4, zorder=4, label="ação perdida")
-        for video, label, offset in [("13522_NoAudio_7", 6, (8, 30)),
-                                     ("33682_NoAudio_5", 8, (-90, 15))]:
+        annotations = ([("13522_NoAudio_7", 6, (8, 30)), ("33682_NoAudio_5", 8, (-90, 15))]
+                       if xi == 1 else
+                       [("31903_NoAudio_7", 6, (10, -25)), ("13522_NoAudio_7", 5, (8, -30))])
+        for video, label, offset in annotations:
             indices = [i for i, action in enumerate(actions)
                        if video in action["video-id"] and action["label"] == label]
             assert len(indices) == 1
@@ -141,14 +158,15 @@ def plot_scores(actions):
             ax.annotate(f"{short_video} classe {label}", (x[i], y[i]), xytext=offset,
                         textcoords="offset points", fontsize=8,
                         arrowprops=dict(arrowstyle="->", color="0.3"))
-        ax.text(0.03, 0.97, f"Mediana Prog − U = {median:.3f}\nProg > U em {greater}/{len(diff)}",
+        ax.text(0.03, 0.97, f"Mediana {yname} − {xname} = {median:.3f}\n"
+                f"{yname} > {xname} em {greater}/{len(diff)}",
                 transform=ax.transAxes, va="top", fontsize=8,
                 bbox=dict(facecolor="white", edgecolor="0.8", alpha=0.9))
         ax.text(0.31, 0.02, "corte 0,30", fontsize=8, color="0.4")
-        ax.set(xlim=(0, 1), ylim=(0, 1), title=title, xlabel="Score U-1024")
+        ax.set(xlim=(0, 1), ylim=(0, 1), title=title, xlabel=f"Score {xname}",
+               ylabel=f"Score {yname}")
         ax.legend(loc="lower right", fontsize=8)
-    axes[0].set_ylabel("Score Progressivo")
-    fig.suptitle("Score do AMA por ação anotada: U-1024 × Progressivo (48 ações)")
+    fig.suptitle("Score do AMA por ação anotada (48 ações)")
     fig.subplots_adjust(left=0.08, right=0.87, bottom=0.12, top=0.85, wspace=0.12)
     fig.colorbar(points, cax=fig.add_axes([0.89, 0.17, 0.018, 0.63]), label="score do denso")
     fig.savefig(OUT / "scores-pareados.png", dpi=150)
@@ -157,27 +175,35 @@ def plot_scores(actions):
 
 def main():
     comparison = json.loads((ROOT / "comparacao.json").read_text())
+    drop = json.loads((ROOT / "drop/comparacao.json").read_text())
     actions = comparison["actions"]
+    assert len(actions) == len(drop["actions"])
+    for action, other in zip(actions, drop["actions"], strict=True):
+        assert {k: v for k, v in action.items() if k != "arms"} == {
+            k: v for k, v in other.items() if k != "arms"}
+        action["arms"].update({k: v for k, v in other["arms"].items() if k.startswith("drop/")})
+    comparison["arms"].update({k: v for k, v in drop["arms"].items() if k.startswith("drop/")})
     gt = pd.DataFrame(actions)
-    latencies = {run: json.loads((ROOT / folder / "latency.json").read_text())["arms"]
-                 for run, _, folder, _ in MODES}
-    detections = {f"{run}/{variant}": pd.read_csv(ROOT / run / "ama" / variant / "predictions.csv")
-                  for run, _, _, _ in MODES for variant, _, _, _, _ in ARMS}
+    latencies = {mode: json.loads((ROOT / folder / "latency.json").read_text())["arms"]
+                 for mode, folder in [("FP32", "latency-fp32"),
+                                      ("FP16+SDPA", "drop/latency-fp16")]}
+    detections = {f"{run}/{ARMS[i][0]}": pd.read_csv(
+        run_path(run) / "ama" / ARMS[i][0] / "predictions.csv") for run, i, _ in ROWS}
     indexed = {key: frame.assign(detection_index=frame.index) for key, frame in detections.items()}
     fps = false_positive_table(gt, indexed)
     fp_indices = {key: set(fps.loc[fps["arm"] == key, "detection_index"])
                   for key in detections}
 
     print("Arm | Mode | p50 ms | Recovered | FP | mAP")
-    for run, mode, _, _ in MODES:
-        for variant, latency_key, name, _, _ in ARMS:
-            key = f"{run}/{variant}"
-            arm = comparison["arms"][key]
-            ms = latencies[run][latency_key]["p50_ms"]
-            print(f"{name} | {mode} | {ms:.0f} | {arm['recovered']} | "
-                  f"{arm['false_positives']} | {arm['map']:.3f}")
-            assert len(fp_indices[key]) == arm["false_positives"]
-            assert sum(a["arms"][key]["recovered"] for a in actions) == arm["recovered"]
+    for run, i, mode in ROWS:
+        variant, latency_key, name, _, _ = ARMS[i]
+        key = f"{run}/{variant}"
+        arm = comparison["arms"][key]
+        ms = latencies[mode][latency_key]["p50_ms"]
+        print(f"{name} | {mode} | {ms:.1f} | {arm['recovered']} | "
+              f"{arm['false_positives']} | {arm['map']:.3f}")
+        assert len(fp_indices[key]) == arm["false_positives"]
+        assert sum(a["arms"][key]["recovered"] for a in actions) == arm["recovered"]
     assert len(actions) == 48
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -188,23 +214,25 @@ def main():
         (48, 1.0), strict=True,
     ):
         ax.axhline(ref, color="gray", linestyle="--", linewidth=0.8, zorder=0)
-        for index, (variant, latency_key, name, _, color) in enumerate(ARMS):
-            xs = [latencies[run][latency_key]["p50_ms"] for run, _, _, _ in MODES]
-            ys = [comparison["arms"][f"{run}/{variant}"][metric] for run, _, _, _ in MODES]
-            ax.plot(xs, ys, color=color, linestyle=":", linewidth=1)
-            for mode_index, (run, mode, _, marker) in enumerate(MODES):
-                arm = comparison["arms"][f"{run}/{variant}"]
-                x, y = xs[mode_index], ys[mode_index]
-                ax.scatter(x, y, marker=marker, s=60, edgecolors=color,
-                           facecolors="none" if mode_index == 0 else color, zorder=3)
-                offset = [(8, 8), (8, -29), (-8, 9)][index]
-                if index == 0 and mode_index == 0:
-                    offset = (-8, 8)
-                if index == 2 and mode_index == 1:
-                    offset = (8, 9)
-                ax.annotate(f"{name} {mode}\n{x:.0f} ms · {arm['false_positives']} FP",
-                            (x, y), xytext=offset, textcoords="offset points", fontsize=7,
-                            ha="right" if offset[0] < 0 else "left", color=color)
+        for i in range(3):
+            fp32, fp16 = ROWS[i], ROWS[i + 3]
+            variant, latency_key, _, _, color = ARMS[i]
+            ax.plot([latencies[row[2]][latency_key]["p50_ms"] for row in (fp32, fp16)],
+                    [comparison["arms"][f"{row[0]}/{variant}"][metric]
+                     for row in (fp32, fp16)], color=color, linestyle=":", linewidth=1)
+        for run, i, mode in ROWS:
+            variant, latency_key, name, _, color = ARMS[i]
+            arm = comparison["arms"][f"{run}/{variant}"]
+            x, y = latencies[mode][latency_key]["p50_ms"], arm[metric]
+            fp32 = mode == "FP32"
+            ax.scatter(x, y, marker="o" if fp32 else "s", s=60, edgecolors=color,
+                       facecolors="none" if fp32 else color, zorder=3)
+            offset = ([(8, 8), (8, -29), (-8, 9)][i] if fp32 else
+                      [(8, 8), (45, -40), (45, 20), (45, -20), (45, 22)][i])
+            ax.annotate(f"{name} {mode}\n{x:.1f} ms · {arm['false_positives']} FP",
+                        (x, y), xytext=offset, textcoords="offset points", fontsize=7,
+                        ha="right" if offset[0] < 0 else "left", color=color,
+                        arrowprops=dict(arrowstyle="-", color=color, lw=0.7))
         ax.set_xscale("log")
         ax.set_xlim(130, 2500)
         ax.xaxis.set_major_locator(FixedLocator([150, 250, 500, 1000, 2000]))
@@ -223,13 +251,15 @@ def main():
     fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8, frameon=False)
     fig.suptitle("Fronteira latência × qualidade — 3 vídeos de dev, 48 ações "
                  "(Jetson AGX Orin, lote 8)")
-    fig.tight_layout(rect=(0, 0.13, 1, 0.93))
+    fig.text(0.5, 0.93, "latências FP16 medidas numa mesma sessão (12/11); FP32 em 11/11",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, 0.13, 1, 0.91))
     fig.savefig(OUT / "fronteira.png", dpi=150)
     plt.close(fig)
 
     videos = sorted(gt["video-id"].unique())
     assert len(videos) == 3
-    fig, axes = plt.subplots(3, 1, figsize=(18, 11))
+    fig, axes = plt.subplots(3, 1, figsize=(18, 15))
     colors = plt.get_cmap("tab20").colors
     counts = {key: [0, 0] for key in detections}
     for ax, video in zip(axes, videos, strict=True):
@@ -238,34 +268,33 @@ def main():
             ax.barh(0, action["t-end"] - action["t-start"], left=action["t-start"],
                     height=0.7, color=colors[int(action["label"])])
         last_end = max(a["t-end"] for a in video_actions)
-        for row, (run, _, _, _) in enumerate(MODES):
-            for index, (variant, _, _, _, _) in enumerate(ARMS):
-                key = f"{run}/{variant}"
-                y = 1 + row * 3 + index
-                frame = detections[key]
-                frame = frame[frame["video-id"] == video]
-                if not frame.empty:
-                    last_end = max(last_end, frame["t-end"].max())
-                for detection_index, detection in frame[frame["score"] >= 0.30].sort_values(
-                    "score"
-                ).iterrows():
-                    is_fp = detection_index in fp_indices[key]
-                    counts[key][1] += is_fp
-                    ax.barh(y, detection["t-end"] - detection["t-start"],
-                            left=detection["t-start"], height=0.7,
-                            color=(*colors[int(detection["label"])][:3],
-                                   0.35 + 0.65 * min(detection["score"], 1)),
-                            edgecolor="black" if is_fp else "none", linewidth=2 if is_fp else 0)
-                for action in video_actions:
-                    if not action["arms"][key]["recovered"]:
-                        counts[key][0] += 1
-                        ax.plot((action["t-start"] + action["t-end"]) / 2, y,
-                                marker="x", color="red", markersize=10, markeredgewidth=2,
-                                zorder=5)
+        for row, (run, i, _) in enumerate(ROWS):
+            key = f"{run}/{ARMS[i][0]}"
+            y = 1 + row
+            frame = detections[key]
+            frame = frame[frame["video-id"] == video]
+            if not frame.empty:
+                last_end = max(last_end, frame["t-end"].max())
+            for detection_index, detection in frame[frame["score"] >= 0.30].sort_values(
+                "score"
+            ).iterrows():
+                is_fp = detection_index in fp_indices[key]
+                counts[key][1] += is_fp
+                ax.barh(y, detection["t-end"] - detection["t-start"],
+                        left=detection["t-start"], height=0.7,
+                        color=(*colors[int(detection["label"])][:3],
+                               0.35 + 0.65 * min(detection["score"], 1)),
+                        edgecolor="black" if is_fp else "none", linewidth=2 if is_fp else 0)
+            for action in video_actions:
+                if not action["arms"][key]["recovered"]:
+                    counts[key][0] += 1
+                    ax.plot((action["t-start"] + action["t-end"]) / 2, y,
+                            marker="x", color="red", markersize=10, markeredgewidth=2,
+                            zorder=5)
         ax.axhline(3.5, color="gray", linewidth=0.6)
-        ax.set_yticks(range(7), ["Anotações"] + [f"{name} {mode}"
-                      for _, mode, _, _ in MODES for _, _, name, _, _ in ARMS])
-        ax.set_ylim(6.6, -0.6)
+        ax.set_yticks(range(9), ["Anotações"] + [f"{ARMS[i][2]} {mode}"
+                      for _, i, mode in ROWS])
+        ax.set_ylim(8.6, -0.6)
         ax.set_xlim(0, last_end + 10)
         ax.set_xlabel("segundos no vídeo")
         ax.set_title(video.removeprefix("Dashboard_user_id_"))
@@ -282,13 +311,12 @@ def main():
     plt.close(fig)
 
     print("Arm | Mode | missed x | FP outlines")
-    for run, mode, _, _ in MODES:
-        for variant, _, name, _, _ in ARMS:
-            key = f"{run}/{variant}"
-            missed, outlined = counts[key]
-            assert missed == len(actions) - comparison["arms"][key]["recovered"]
-            assert outlined == comparison["arms"][key]["false_positives"]
-            print(f"{name} | {mode} | {missed} | {outlined}")
+    for run, i, mode in ROWS:
+        key = f"{run}/{ARMS[i][0]}"
+        missed, outlined = counts[key]
+        assert missed == len(actions) - comparison["arms"][key]["recovered"]
+        assert outlined == comparison["arms"][key]["false_positives"]
+        print(f"{ARMS[i][2]} | {mode} | {missed} | {outlined}")
 
     plot_tokens()
     plot_fidelity(videos)
