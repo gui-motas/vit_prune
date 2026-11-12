@@ -191,6 +191,31 @@ Fronteira custo × qualidade nos 3 vídeos de dev, com latência do §3 e speedu
 | U-1024 FP16+SDPA | 169 | 12,0× | 46/48 | 4 | 0,977 |
 | **P FP16+SDPA** | **163** | **12,5×** | **46/48** | **2** | **0,990** |
 
+![Fronteira latência × qualidade](figuras-fp16-progressivo/fronteira.png)
+
+*Figura 1.* Latência p50 por clipe (`arms_latency.py`, escala log) contra as ações reencontradas e
+contra o mAP. A cor indica o braço e o marcador indica o modo (círculo vazado = FP32 com a atenção
+original; quadrado = FP16+SDPA). O pontilhado liga o mesmo braço nos dois modos. U-1024 e P têm as mesmas
+46 ações, e por isso os pontos se sobrepõem no painel da esquerda. A diferença entre eles aparece no mAP
+e nos FPs.
+
+![Linha do tempo das detecções por braço](figuras-fp16-progressivo/linha-do-tempo.png)
+
+*Figura 2.* Detecções do AMA com confiança ≥ 0,30 nos 3 vídeos de dev.
+- **Cores:** a cor indica a classe, e quanto mais opaca a barra, mais confiante a detecção.
+- **Contorno preto:** falso positivo.
+- **✗ vermelho:** ação anotada que o braço perdeu: 13522_7 classe 5 (o AMA a confunde com a classe 8,
+  e o denso também gera esse FP) e 31903_7 classe 6.
+- **Os dois modos:** FP32 (em cima) e FP16+SDPA (embaixo) dão o mesmo padrão.
+- **FPs por braço:**
+  - o denso tem os de classe 8 e 12;
+  - o progressivo, os de classe 8 e 10;
+  - o U-1024 tem esses dois e ainda o de classe 12 (13522_7, ~450 s) e o de classe 9 (31903_7,
+    ~160 s).
+
+As duas figuras são geradas por `benchmark/fp16_figures.py` a partir de `fp16-sdpa/comparacao.json`,
+dos `latency-fp*/latency.json` e das predições do AMA.
+
 1. **FP16 + SDPA é a melhoria dominante.**
    - **O denso** fica 5,7× mais rápido sem nenhuma mudança na tarefa: as mesmas 48 ações, os mesmos 2 FPs
      e scores a até 0,0003.
