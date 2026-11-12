@@ -400,6 +400,8 @@ def test_nonprogressive_discard_pools_large_fp16_values_in_float32(keep, monkeyp
 
 @pytest.mark.parametrize("keep", [8, 4])
 def test_discard_noncontiguous_prior_keeps_correct_tokens_and_scores(keep, monkeypatch):
+    import sys
+
     import vitprune.core.encoder as module
     from vitprune.core.scoring import score_tokens
 
@@ -412,21 +414,22 @@ def test_discard_noncontiguous_prior_keeps_correct_tokens_and_scores(keep, monke
     prior[positions] = weights
     encoder = PrunedEncoder(backbone, geometry, PruningPlan(
         budget=FixedBudget(keep * 4), spatial_prior=prior, discard_outside=True))
-    cut, surviving, score_result, merge_input = [], [], [], []
+    cut, surviving, subset, merge_input = [], [], [], []
     backbone.blocks[1].register_forward_hook(lambda m, a, output: cut.append(output.clone()))
     backbone.blocks[2].register_forward_pre_hook(lambda m, args: surviving.append(args[0].clone()))
-    with_prior, merge = encoder._with_prior, module.merge_tokens
+    groups, merge = encoder._groups, module.merge_tokens
 
-    def observe_prior(base):
-        result = with_prior(base)
-        score_result.append(result.clone())
-        return result
+    def observe_groups(keeps):
+        # No-merge consumes no scores, so inspect the actual subset at the grouping boundary.
+        local = sys._getframe(1).f_locals
+        subset.append((local["grid"].clone(), local["scores"].clone()))
+        return groups(keeps)
 
     def observe_merge(tokens, sizes, scores, count, groups):
         merge_input.append((tokens.clone(), scores.clone()))
         return merge(tokens, sizes, scores, count, groups)
 
-    monkeypatch.setattr(encoder, "_with_prior", observe_prior)
+    monkeypatch.setattr(encoder, "_groups", observe_groups)
     monkeypatch.setattr(module, "merge_tokens", observe_merge)
     encoder.encode(torch.randn(*geometry.input_shape(batch=2)))
     grid = cut[0].reshape(2, 4, 16, geometry.embed_dim)
@@ -434,7 +437,9 @@ def test_discard_noncontiguous_prior_keeps_correct_tokens_and_scores(keep, monke
     base = score_tokens(grid, .5)
     expected_scores = torch.stack([base[:, :, pos] * weight
                                    for pos, weight in zip(positions, weights, strict=True)], dim=-1)
-    torch.testing.assert_close(score_result[0][:, :, positions], expected_scores)
+    assert len(subset) == 1
+    torch.testing.assert_close(subset[0][0], inside)
+    torch.testing.assert_close(subset[0][1], expected_scores)
     if keep == 8:
         assert not merge_input
         torch.testing.assert_close(surviving[0], inside.reshape(2, 32, geometry.embed_dim))
