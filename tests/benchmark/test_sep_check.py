@@ -20,23 +20,36 @@ def load_check():
     return module
 
 
-def test_saved_features_match_clip_starts_and_reject_incomplete_schedule(tmp_path):
+def test_saved_features_follow_recorded_clips_not_scheduled_starts(tmp_path):
     check = load_check()
     folder = tmp_path / "features" / "prog_1536_1024_768_mascara"
     folder.mkdir(parents=True)
     (tmp_path / "run.json").write_text(json.dumps({
         "settings": {"stride": 16, "frame_step": 2},
-        "schedules": {"v": {"frames": 80, "clips": 4}},
+        "schedules": {"v": {"frames": 96, "clips": 5}},
     }))
-    features = np.array([[0, 10], [1, 11], [2, 12], [3, 13]], dtype=np.float32)
+    entries = [{"video": "v", "variant": "prog_1536_1024_768_mascara", "start_frame": i}
+               for i in [48, 0, 32]]
+    entries += [{"video": "v", "variant": "denso", "start_frame": 16},
+                {"video": "other", "variant": "prog_1536_1024_768_mascara", "start_frame": 64}]
+    (tmp_path / "clips.jsonl").write_text("\n".join(json.dumps(row) for row in entries) + "\n")
+    features = np.array([[0, 10], [1, 11], [2, 12]], dtype=np.float32)
     np.savez(folder / "v.npz", feats=features)
-    bench = SimpleNamespace(stride=16, frame_step=2, clip_starts=lambda frames: [0, 16, 32, 48])
+    bench = SimpleNamespace(stride=16, frame_step=2,
+                            clip_starts=lambda frames: [0, 16, 32, 48, 64])
     manifest = [{"video": "v", "starts": [48, 0]}, {"video": "v", "starts": [32]}]
     actual = check.load_baseline(bench, manifest, tmp_path)
-    np.testing.assert_array_equal(actual[0], features[[3, 0]])
-    np.testing.assert_array_equal(actual[1], features[[2]])
+    np.testing.assert_array_equal(actual[0], features[[2, 0]])
+    np.testing.assert_array_equal(actual[1], features[[1]])
+    duplicated = [entries[0], entries[0], entries[1]]
+    (tmp_path / "clips.jsonl").write_text("\n".join(json.dumps(row) for row in duplicated) + "\n")
+    with pytest.raises(ValueError, match="duplicate recorded clip starts"):
+        check.load_baseline(bench, manifest, tmp_path)
+    (tmp_path / "clips.jsonl").write_text("\n".join(json.dumps(row) for row in entries) + "\n")
+    with pytest.raises(ValueError, match="v.*64.*absent"):
+        check.load_baseline(bench, [{"video": "v", "starts": [64]}], tmp_path)
     np.savez(folder / "v.npz", feats=features[:-1])
-    with pytest.raises(ValueError, match="v.*4.*3|v.*3.*4"):
+    with pytest.raises(ValueError, match="v.*2.*3|v.*3.*2"):
         check.load_baseline(bench, manifest, tmp_path)
     np.savez(folder / "v.npz", feats=np.array(1.0))
     with pytest.raises(ValueError, match="v.*feats"):
@@ -91,7 +104,10 @@ def test_control_gates_decision_against_saved_embeddings(tmp_path, monkeypatch, 
             assert result["control"]["min_cosine"] < .9999
 
 
-def test_incomplete_baseline_aborts_before_inference(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("recorded,expected", [([0, 16, 32, 48], "3 saved rows"),
+                                                ([16, 32, 48], "sampled start 0 absent")])
+def test_incomplete_baseline_aborts_before_inference(tmp_path, monkeypatch, capsys,
+                                                     recorded, expected):
     check = load_check()
     root = tmp_path / "b2"
     folder = root / "features" / "prog_1536_1024_768_mascara"
@@ -100,6 +116,9 @@ def test_incomplete_baseline_aborts_before_inference(tmp_path, monkeypatch, caps
         "settings": {"stride": 16, "frame_step": 2},
         "schedules": {"v": {"frames": 80, "clips": 4}},
     }))
+    (root / "clips.jsonl").write_text("\n".join(json.dumps({
+        "video": "v", "variant": "prog_1536_1024_768_mascara", "start_frame": start,
+    }) for start in recorded) + "\n")
     np.savez(folder / "v.npz", feats=np.ones((3, 2), dtype=np.float32))
     bench = SimpleNamespace(device="cpu", stride=16, frame_step=2,
                             clip_starts=lambda frames: [0, 16, 32, 48])
@@ -113,7 +132,7 @@ def test_incomplete_baseline_aborts_before_inference(tmp_path, monkeypatch, caps
                                       str(tmp_path / "out")])
     assert check.main() == 2
     result = json.loads((tmp_path / "out" / "check.json").read_text())
-    assert not result["control"]["passed"] and "3 saved rows" in result["control"]["error"]
+    assert not result["control"]["passed"] and expected in result["control"]["error"]
     assert "decision" not in result
     output = capsys.readouterr().out
     assert "CONTROLE FALHOU" in output and "ADIAR" not in output and "PROSSEGUIR" not in output

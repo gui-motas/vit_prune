@@ -14,26 +14,34 @@ PROGRESSIVE = "prog_1536_1024_768_mascara"
 
 
 def load_baseline(bench, manifest, root):
-    """Select saved B2 rows in the sampled clip order, refusing incomplete schedules."""
+    """Select saved B2 rows by the recorded decoded clip starts."""
     import numpy as np
 
     run = json.loads((root / "run.json").read_text(encoding="utf-8"))
     if any(run["settings"][key] != getattr(bench, key) for key in ("stride", "frame_step")):
         raise ValueError("B2 sampling settings differ from this check")
+    names = {batch["video"] for batch in manifest}
+    recorded = {name: [] for name in names}
+    with (root / "clips.jsonl").open(encoding="utf-8") as stream:
+        for line in stream:
+            row = json.loads(line)
+            if row["variant"] == PROGRESSIVE and row["video"] in recorded:
+                recorded[row["video"]].append(row["start_frame"])
     videos, selected = {}, []
     for batch in manifest:
         name = batch["video"]
         if name not in videos:
-            schedule = run["schedules"][name]
-            starts = bench.clip_starts(schedule["frames"])
+            starts = sorted(recorded[name])
             path = root / "features" / PROGRESSIVE / f"{name}.npz"
             with np.load(path, allow_pickle=False) as data:
                 features = data["feats"]
             if features.ndim != 2:
                 raise ValueError(f"{name}: B2 feats must have shape [clips, dimensions]")
-            if len(starts) != schedule["clips"] or len(features) != len(starts):
-                raise ValueError(f"{name}: {len(features)} saved rows, {len(starts)} scheduled "
-                                 f"starts, {schedule['clips']} recorded clips")
+            if len(features) != len(starts):
+                raise ValueError(f"{name}: {len(features)} saved rows, "
+                                 f"{len(starts)} recorded clips")
+            if len(set(starts)) != len(starts):
+                raise ValueError(f"{name}: duplicate recorded clip starts")
             if not np.isfinite(features).all():
                 raise ValueError(f"{name}: non-finite B2 features")
             videos[name] = (features, {start: index for index, start in enumerate(starts)})
