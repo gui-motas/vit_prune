@@ -440,7 +440,7 @@ O U-1024 não entrou nesta execução. A linha dele só traz a latência, medida
 ### 7.1 Poda ou fusão? Como classificar o P-drop
 
 Entre todos os braços testados, o P-drop é o único que **descarta tokens de verdade**. Todos os outros
-(U-1024, P, P-sep e as políticas da QABP) reduzem tokens só por **fusão**: o que sai é incorporado,
+(U-1024, P, P-sep e as políticas adaptativas legadas) reduzem tokens só por **fusão**: o que sai é incorporado,
 por média ponderada, num token que fica.
 
 **De onde vem a economia** (tokens × blocos, sobre os 81.920 do denso; as camadas lineares dominam o custo,
